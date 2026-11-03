@@ -12,6 +12,10 @@ const tokenResponse = z.object({
 });
 
 const idTokenClaims = z.object({
+  iss: z.string(),
+  aud: z.union([z.string(), z.array(z.string()).min(1)]),
+  azp: z.string().optional(),
+  exp: z.number().int(),
   tid: z.string(),
   oid: z.string().optional(),
   sub: z.string(),
@@ -78,10 +82,24 @@ export class EntraClient {
     }
     // The ID token came directly from Entra's token endpoint over TLS, so its signature
     // need not be re-verified (OIDC Core 3.1.3.7); its claims are still validated.
-    const claims = idTokenClaims.safeParse(JSON.parse(
-      Buffer.from(body.id_token.split(".")[1] ?? "", "base64url").toString("utf8") || "null"));
+    let payload: unknown;
+    try {
+      payload = JSON.parse(Buffer.from(body.id_token.split(".")[1] ?? "", "base64url").toString("utf8"));
+    } catch {
+      throw new UpstreamError(502, "invalid_id_token");
+    }
+    const claims = idTokenClaims.safeParse(payload);
     if (!claims.success) throw new UpstreamError(502, "invalid_id_token");
     if (claims.data.tid !== MSA_TENANT_ID) throw new UpstreamError(403, "not_personal_account");
+    const { iss, aud, azp, exp } = claims.data;
+    const audiences = typeof aud === "string" ? [aud] : aud;
+    if (iss !== `https://login.microsoftonline.com/${MSA_TENANT_ID}/v2.0` ||
+        !audiences.includes(this.clientId) ||
+        (audiences.length > 1 && azp !== this.clientId) ||
+        (azp !== undefined && azp !== this.clientId) ||
+        exp <= Math.floor(Date.now() / 1000)) {
+      throw new UpstreamError(502, "invalid_id_token");
+    }
     return {
       tokens: tokensFrom(body),
       user: {

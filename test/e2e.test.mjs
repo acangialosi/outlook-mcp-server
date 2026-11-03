@@ -49,7 +49,11 @@ function fakeMicrosoft({ tid = MSA_TID, username = "user@example.com" } = {}) {
         access_token: `graph-at-${calls.token.length}`,
         refresh_token: `graph-rt-${calls.token.length}`,
         expires_in: 3600,
-        id_token: idToken({ tid, oid: "user-oid", sub: "s", name: "Test User", preferred_username: username }),
+        id_token: idToken({
+          tid, oid: "user-oid", sub: "s", name: "Test User", preferred_username: username,
+          iss: `https://login.microsoftonline.com/${MSA_TID}/v2.0`,
+          aud: form.get("client_id"), exp: Math.floor(Date.now() / 1000) + 3600,
+        }),
       });
     }
     if (url.hostname === "graph.microsoft.com" && url.pathname === "/v1.0/$batch" && init.method === "POST") {
@@ -358,6 +362,29 @@ describe("write tools", () => {
     await mcp.close();
   });
 
+  it("rejects dot-segment IDs for reads, individual writes and batches before any Graph request", async () => {
+    const { mcp, ms } = await connected();
+    const before = ms.calls.graph.length;
+    for (const id of [".", ".."]) {
+      for (const [name, args] of [
+        ["get_message", { id }],
+        ["move_message", { id, destination: "archive" }],
+        ["mark_not_junk", { id }],
+        ["move_messages", { ids: ["m1", id], destination: "archive" }],
+        ["update_messages", { ids: ["m1", id], isRead: true }],
+      ]) {
+        const response = await mcp.callTool({ name, arguments: args });
+        assert.equal(response.isError, true, `${name}: ${id}`);
+        assert.equal(ms.calls.graph.length, before, `${name}: no Graph request for ${id}`);
+        assert.equal(ms.batches.length, 0, `${name}: no batch request for ${id}`);
+      }
+    }
+    const valid = await mcp.callTool({ name: "get_message", arguments: { id: "m.part..id" } });
+    assert.equal(valid.isError, undefined, "dots within an ID remain valid");
+    assert.equal(result(valid).id, "m.part..id");
+    await mcp.close();
+  });
+
   it("mark_not_junk reports notJunk via beta reportMessage", async () => {
     const { mcp, ms } = await connected();
     const r = await mcp.callTool({ name: "mark_not_junk", arguments: { id: "j1" } });
@@ -530,6 +557,19 @@ describe("mailbox tools", () => {
   }
   const result = (r) => JSON.parse(r.content[0].text);
   const lastQuery = (ms) => new URL(ms.calls.graph.at(-1).url).searchParams;
+
+  it("reports equal or reversed calendar ranges without calling Graph", async () => {
+    const { mcp, ms } = await connected();
+    const before = ms.calls.graph.length;
+    const start = "2026-10-13T00:00:00Z";
+    for (const end of [start, "2026-10-12T00:00:00Z"]) {
+      const response = await mcp.callTool({ name: "list_events", arguments: { start, end } });
+      assert.equal(response.isError, true);
+      assert.match(response.content[0].text, /end must be after start/);
+      assert.equal(ms.calls.graph.length, before);
+    }
+    await mcp.close();
+  });
 
   it("fields narrows $select (id always included), allows 100 per page, and strips etags", async () => {
     const { mcp, ms } = await connected();

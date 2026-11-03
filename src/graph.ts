@@ -38,11 +38,31 @@ export interface Page {
  * Canonical form of a Graph path for comparing a nextLink with the collection it should continue.
  * Graph writes keys in OData form in its nextLinks: a request for /me/mailFolders/inbox/messages pages on as
  * /me/mailFolders('inbox')/messages. Both forms address the same collection, so ('key') segments become /key
- * (with '' unescaped to '), and the result is decoded and lower-cased.
+ * (with '' unescaped to '). Route names are case-insensitive, but IDs are not.
  */
 function collectionKey(pathname: string): string {
-  const decoded = decodeURIComponent(pathname);
-  return decoded.replace(/\('((?:[^']|'')*)'\)/g, (_m, key: string) => `/${key.replaceAll("''", "'")}`).toLowerCase();
+  const collections = new Set(["users", "mailfolders", "childfolders", "messages", "contacts", "calendars", "events"]);
+  const routes = new Set(["v1.0", "me", "calendarview", "attachments", ...collections]);
+  const parts: string[] = [];
+  let expectsId = false;
+  for (const segment of pathname.split("/")) {
+    const decoded = decodeURIComponent(segment);
+    if (expectsId) {
+      parts.push(decoded);
+      expectsId = false;
+      continue;
+    }
+    const keyed = /^([a-z]+)\('((?:[^']|'')*)'\)$/i.exec(decoded);
+    if (keyed && collections.has(keyed[1]!.toLowerCase())) {
+      parts.push(keyed[1]!.toLowerCase(), keyed[2]!.replaceAll("''", "'"));
+      continue;
+    }
+    const lower = decoded.toLowerCase();
+    parts.push(routes.has(lower) ? lower : decoded);
+    expectsId = collections.has(lower);
+  }
+  // Keep encoded slashes inside an identifier distinct from actual path boundaries.
+  return JSON.stringify(parts);
 }
 
 function withoutEtag(item: unknown): unknown {

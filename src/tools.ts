@@ -25,7 +25,8 @@ const fields = z.array(z.enum(MESSAGE_FIELD_NAMES)).min(1).max(MESSAGE_FIELD_NAM
 const selectFields = (requested?: readonly string[]) =>
   requested ? ["id", ...new Set(requested)].join(",") : MESSAGE_FIELDS;
 const nextLink = z.string().url().max(4096).optional().describe("nextLink from a previous call, to get the next page.");
-const graphId = z.string().min(1).max(1024).regex(/^[^/\\?#\s]+$/, "Invalid ID.");
+const graphId = z.string().min(1).max(1024).regex(/^[^/\\?#\s]+$/, "Invalid ID.")
+  .refine((value) => value !== "." && value !== "..", "Invalid ID.");
 const messageIds = z.array(graphId).min(1).max(100)
   .describe("Up to 100 message IDs from list_messages or search_messages. Duplicates are ignored.");
 
@@ -396,7 +397,7 @@ export function createOutlookServer(graph: GraphClient): McpServer {
     }),
     annotations: readOnly,
   }, ({ start, end, top, nextLink }) => run(async () => {
-    if (Date.parse(end) <= Date.parse(start)) throw new Error("end must be after start.");
+    if (Date.parse(end) <= Date.parse(start)) throw new InputError("end must be after start.");
     return graph.page("/me/calendarView", {
       startDateTime: start,
       endDateTime: end,

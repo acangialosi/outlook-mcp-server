@@ -2,7 +2,7 @@ import { TableClient, RestError } from "@azure/data-tables";
 import { DefaultAzureCredential } from "@azure/identity";
 import { Sealer } from "./crypto.js";
 
-export type Kind = "client" | "txn" | "grant" | "code" | "access" | "refresh";
+export type Kind = "client" | "txn" | "grant" | "code" | "access" | "refresh" | "refreshFamily" | "revoked";
 
 /**
  * Expiring key-value storage. Every value is JSON, encrypted with AES-GCM and bound to

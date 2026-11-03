@@ -39,6 +39,8 @@ interface TxnRecord {
 interface GrantRecord {
   /** GRANT_VERSION the user consented under; older grants are discarded. */
   version?: number;
+  /** Bounds delayed writes so they cannot outlive a revocation marker. */
+  expiresAt?: number;
   userId: string;
   username?: string;
   clientId: string;
@@ -176,8 +178,25 @@ function cookies(request: Request): Map<string, string> {
 }
 
 async function readBody(request: Request, limit = 16_384): Promise<string | undefined> {
-  const text = await request.text();
-  return text.length > limit ? undefined : text;
+  if (!request.body) return "";
+  const reader = request.body.getReader();
+  const decoder = new TextDecoder();
+  let bytes = 0;
+  let text = "";
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) return text + decoder.decode();
+      bytes += value.byteLength;
+      if (bytes > limit) {
+        await reader.cancel().catch(() => undefined);
+        return undefined;
+      }
+      text += decoder.decode(value, { stream: true });
+    }
+  } finally {
+    reader.releaseLock();
+  }
 }
 
 /**
@@ -369,6 +388,7 @@ export class OAuthServer implements OAuthTokenVerifier {
     const grantId = randomToken();
     await this.store.put("grant", grantId, {
       version: GRANT_VERSION,
+      expiresAt: Date.now() + TTL.grant * 1000,
       userId: signIn.user.id,
       clientId: txn.clientId,
       upstreamRefreshToken: signIn.tokens.refreshToken!,
@@ -409,23 +429,42 @@ export class OAuthServer implements OAuthTokenVerifier {
       return this.issueTokens(record.grantId, client.clientId);
     }
     if (grantType === "refresh_token") {
+      const expiresAt = Date.now() + TTL.grant * 1000;
       const token = form.get("refresh_token") ?? "";
-      const record = token ? await this.store.take<RefreshRecord>("refresh", hashToken(token)) : undefined;
-      if (!record || record.clientId !== client.clientId) return oauthError("invalid_grant", "Invalid or expired refresh token.");
+      const key = hashToken(token);
+      let family = token ? await this.store.get<RefreshRecord>("refreshFamily", key) : undefined;
+      if (!family && token) {
+        // Upgrade still-live tokens issued before persistent reuse tracking.
+        family = await this.store.get<RefreshRecord>("refresh", key);
+        if (family?.clientId === client.clientId) {
+          await this.store.put("refreshFamily", key, family, TTL.refresh);
+        }
+      }
+      if (!family || family.clientId !== client.clientId) return oauthError("invalid_grant", "Invalid or expired refresh token.");
+      const record = await this.store.take<RefreshRecord>("refresh", key);
+      if (!record) {
+        await this.revokeGrant(family.grantId);
+        return oauthError("invalid_grant", "Invalid or expired refresh token.");
+      }
+      if (record.clientId !== client.clientId) return oauthError("invalid_grant", "Invalid or expired refresh token.");
       const grant = await this.currentGrant(record.grantId);
       if (!grant) return oauthError("invalid_grant", "The authorization was revoked. Sign in again.");
-      await this.store.put("grant", record.grantId, grant, TTL.grant);
+      await this.store.put("grant", record.grantId, { ...grant, expiresAt }, TTL.grant);
       return this.issueTokens(record.grantId, client.clientId);
     }
     return oauthError("unsupported_grant_type", "Use authorization_code or refresh_token.");
   }
 
   private async issueTokens(grantId: string, clientId: string): Promise<Response> {
+    if (!await this.currentGrant(grantId)) return oauthError("invalid_grant", "The authorization was revoked. Sign in again.");
     const accessToken = randomToken();
     const refreshToken = randomToken();
     const expiresAt = Math.floor(Date.now() / 1000) + TTL.access;
+    // Keep the hashed token's family after atomic consumption, including across replicas.
+    await this.store.put("refreshFamily", hashToken(refreshToken), { grantId, clientId } satisfies RefreshRecord, TTL.refresh);
     await this.store.put("access", hashToken(accessToken), { grantId, clientId, expiresAt } satisfies AccessRecord, TTL.access);
     await this.store.put("refresh", hashToken(refreshToken), { grantId, clientId } satisfies RefreshRecord, TTL.refresh);
+    if (!await this.currentGrant(grantId)) return oauthError("invalid_grant", "The authorization was revoked. Sign in again.");
     return json({
       access_token: accessToken,
       token_type: "Bearer",
@@ -473,6 +512,7 @@ export class OAuthServer implements OAuthTokenVerifier {
 
   /** Returns a Microsoft Graph access token for the grant, refreshing it with Microsoft when needed. */
   async graphAccessToken(grantId: string): Promise<string> {
+    if (!await this.currentGrant(grantId)) throw new ReconnectRequiredError();
     const cached = this.graphTokens.get(grantId);
     if (cached && cached.expiresAt - Date.now() > 120_000) return cached.token;
     let pending = this.refreshing.get(grantId);
@@ -484,6 +524,7 @@ export class OAuthServer implements OAuthTokenVerifier {
   }
 
   private async loadGraphToken(grantId: string): Promise<string> {
+    const expiresAt = Date.now() + TTL.grant * 1000;
     const grant = await this.currentGrant(grantId);
     if (!grant) throw new ReconnectRequiredError();
     if (grant.upstreamAccessToken && (grant.upstreamAccessTokenExpiresAt ?? 0) - Date.now() > 120_000) {
@@ -495,32 +536,40 @@ export class OAuthServer implements OAuthTokenVerifier {
       tokens = await this.entra.refresh(grant.upstreamRefreshToken);
     } catch (error) {
       if (error instanceof UpstreamError && (error.code === "invalid_grant" || error.code === "interaction_required")) {
-        await this.store.delete("grant", grantId);
-        this.graphTokens.delete(grantId);
+        await this.revokeGrant(grantId);
         throw new ReconnectRequiredError();
       }
       throw error;
     }
     await this.store.put("grant", grantId, {
       ...grant,
+      expiresAt,
       upstreamRefreshToken: tokens.refreshToken ?? grant.upstreamRefreshToken,
       upstreamAccessToken: tokens.accessToken,
       upstreamAccessTokenExpiresAt: tokens.accessTokenExpiresAt,
     } satisfies GrantRecord, TTL.grant);
+    if (!await this.currentGrant(grantId)) throw new ReconnectRequiredError();
     this.graphTokens.set(grantId, { token: tokens.accessToken, expiresAt: tokens.accessTokenExpiresAt });
     return tokens.accessToken;
   }
 
   // ---- Helpers -------------------------------------------------------------------------
 
-  /** Loads a grant, discarding it if it predates the current Graph scopes. */
+  private async revokeGrant(grantId: string): Promise<void> {
+    // Never delete this marker while stale requests can still write a usable grant.
+    await this.store.put("revoked", grantId, {}, TTL.grant + TTL.refresh);
+    await this.store.delete("grant", grantId);
+    this.graphTokens.delete(grantId);
+  }
+
+  /** Persistent revocation is authoritative even if an in-flight writer restores the grant row. */
   private async currentGrant(grantId: string): Promise<GrantRecord | undefined> {
     const grant = await this.store.get<GrantRecord>("grant", grantId);
-    if (grant && (grant.version ?? 1) < GRANT_VERSION) {
-      await this.store.delete("grant", grantId);
-      this.graphTokens.delete(grantId);
+    if (grant && ((grant.version ?? 1) < GRANT_VERSION || (grant.expiresAt ?? Infinity) <= Date.now())) {
+      await this.revokeGrant(grantId);
       return undefined;
     }
+    if (await this.store.get("revoked", grantId)) return undefined;
     return grant;
   }
 
