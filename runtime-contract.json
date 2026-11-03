@@ -1,0 +1,21 @@
+{
+  "schemaVersion": 1,
+  "runtime": {
+    "port": 8080,
+    "healthPath": "/healthz",
+    "mcpPath": "/mcp"
+  },
+  "environment": {
+    "required": ["PUBLIC_URL", "ENTRA_CLIENT_ID", "ENTRA_CLIENT_SECRET", "TOKEN_ENCRYPTION_KEY"],
+    "optional": ["PORT", "AZURE_TABLE_ENDPOINT", "AZURE_TABLE_NAME", "ALLOWED_USERS"]
+  },
+  "graph": {
+    "scopes": [
+      "https://graph.microsoft.com/User.Read",
+      "https://graph.microsoft.com/Mail.ReadWrite",
+      "https://graph.microsoft.com/Calendars.Read",
+      "https://graph.microsoft.com/Contacts.Read"
+    ],
+    "grantVersion": 2
+  }
+}

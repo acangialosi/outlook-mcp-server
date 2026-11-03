@@ -1,0 +1,20 @@
+# Keeps pinned versions current: npm packages, GitHub Actions (pinned to commit SHAs) and the
+# Node base image (pinned to a digest). Each update arrives as a PR and must pass CI and the
+# security scan before it can ship.
+version: 2
+updates:
+  - package-ecosystem: npm
+    directory: /
+    schedule: { interval: weekly }
+    groups:
+      minor-and-patch: { update-types: [minor, patch] }
+  - package-ecosystem: github-actions
+    directory: /
+    schedule: { interval: weekly }
+  - package-ecosystem: docker
+    directory: /
+    schedule: { interval: weekly }
+    ignore:
+      # Stay on the current Node LTS line; move to a new major deliberately, once it becomes LTS.
+      - dependency-name: node
+        update-types: ["version-update:semver-major"]
