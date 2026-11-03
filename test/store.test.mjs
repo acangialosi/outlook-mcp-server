@@ -73,7 +73,178 @@ function pair(backend) {
 }
 
 describe("bounded expired-record collection", () => {
+  it("revisits previously live records despite sustained insertion between every batch", async (t) => {
+    let now = Date.now();
+    t.mock.method(Date, "now", () => now);
+    const store = new MemoryStore(new Sealer(randomBytes(32)));
+    t.after(() => store.close());
+    await store.put("refreshFamily", "synthetic-expiring", {}, 1);
+    for (let i = 0; i < 200; i++) await store.put("access", `synthetic-initial-${i}`, {}, 3600);
+    assert.equal(await store.cleanupExpired(), 0);
+    now += 2000;
+    let removed = 0;
+    for (let batch = 0; batch < 3; batch++) {
+      for (let i = 0; i < 100; i++) await store.put("access", `synthetic-new-${batch}-${i}`, {}, 3600);
+      removed += await store.cleanupExpired();
+    }
+    assert.equal(removed, 1, "the next finite sweep must revisit the now-expired record");
+    assert.equal(await store.read("refreshFamily", "synthetic-expiring"), undefined);
+  });
+
   for (const backend of ["memory", "table"]) {
+    for (const operation of ["get", "take", "update", "cleanupExpired"]) {
+      it(`retains historical families after downtime during ${operation}, beyond the original grant deadline (${backend})`, async (t) => {
+        let now = Date.now();
+        t.mock.method(Date, "now", () => now);
+        const day = 24 * 60 * 60 * 1000;
+        const { first, second } = pair(backend);
+        t.after(() => { first.close(); second.close(); });
+        const family = { grantId: "synthetic-active", clientId: "synthetic-client" };
+        await first.put("grant", family.grantId, { expiresAt: now + 90 * day }, 90 * 86400);
+        await first.put("refreshFamily", "synthetic-history", family, 30 * 86400);
+        now += 80 * day;
+        assert.equal(await second.update("grant", family.grantId,
+          (grant) => ({ ...grant, expiresAt: now + 90 * day }), 90 * 86400), true);
+        now += 20 * day;
+        if (operation === "cleanupExpired") {
+          assert.equal(await first.cleanupExpired(), 0);
+        } else if (operation === "update") {
+          assert.equal(await second.update("refreshFamily", "synthetic-history",
+            (value) => ({ ...value, reviewed: true }), 30 * 86400), true);
+        } else {
+          assert.deepEqual(await second[operation]("refreshFamily", "synthetic-history"), family);
+        }
+        assert.deepEqual(await first.get("refreshFamily", "synthetic-history"),
+          operation === "take" ? undefined : { ...family, ...(operation === "update" ? { reviewed: true } : {}) });
+        if (operation !== "take") {
+          assert.ok((await first.read("refreshFamily", "synthetic-history")).expiresAt > now);
+        }
+        if (operation === "cleanupExpired") {
+          now += 71 * day;
+          assert.ok(await first.cleanupExpired());
+          assert.equal(await second.read("refreshFamily", "synthetic-history"), undefined,
+            "retained history must be collected once the sliding session ends");
+        }
+      });
+    }
+
+    it(`eventually collects missing, revoked, expired and logically expired families (${backend})`, async (t) => {
+      const { first, second } = pair(backend);
+      t.after(() => { first.close(); second.close(); });
+      const now = Date.now();
+      for (const state of ["missing", "revoked", "expired", "logical"]) {
+        const grantId = `synthetic-${state}`;
+        if (state !== "missing") {
+          await first.put("grant", grantId, { expiresAt: state === "logical" ? now - 1 : now + 3600000 },
+            state === "expired" ? -1 : 3600);
+        }
+        if (state === "revoked") await first.put("revoked", grantId, {}, 3600);
+        await first.put("refreshFamily", grantId, { grantId, clientId: "synthetic-client" }, -1);
+      }
+      await first.cleanupExpired();
+      await first.cleanupExpired();
+      for (const state of ["missing", "revoked", "expired", "logical"]) {
+        assert.equal(await second.read("refreshFamily", `synthetic-${state}`), undefined);
+      }
+      assert.ok(await first.get("revoked", "synthetic-revoked"));
+      assert.equal(await first.get("grant", "synthetic-logical"), undefined);
+    });
+
+    it(`fences a delayed grant renewal when session-end collection wins (${backend})`, async (t) => {
+      let now = Date.now();
+      t.mock.method(Date, "now", () => now);
+      const { first, second } = pair(backend);
+      t.after(() => { first.close(); second.close(); });
+      const family = { grantId: "synthetic-ending", clientId: "synthetic-client" };
+      await first.put("grant", family.grantId, { expiresAt: now + 1000 }, 1);
+      await first.put("refreshFamily", "synthetic-history", family, 1);
+      let release, entered;
+      const gate = new Promise((resolve) => { release = resolve; });
+      const started = new Promise((resolve) => { entered = resolve; });
+      const replace = first.replace.bind(first);
+      first.replace = async (...args) => {
+        entered();
+        await gate;
+        return replace(...args);
+      };
+      const renewing = first.update("grant", family.grantId,
+        (grant) => ({ ...grant, expiresAt: now + 120000 }), 120);
+      await started;
+      now += 2000;
+      assert.equal(await second.get("refreshFamily", "synthetic-history"), undefined);
+      release();
+      assert.equal(await renewing, false);
+      assert.equal(await second.get("grant", family.grantId), undefined);
+      assert.equal(await second.read("refreshFamily", "synthetic-history"), undefined);
+    });
+
+    for (const operation of ["get", "cleanupExpired"]) {
+      it(`preserves family history when deferred grant renewal wins expiration cleanup during ${operation} (${backend})`, async (t) => {
+        let now = Date.now();
+        t.mock.method(Date, "now", () => now);
+        const { first, second } = pair(backend);
+        t.after(() => { first.close(); second.close(); });
+        const family = { grantId: "synthetic-renewal", clientId: "synthetic-client" };
+        await first.put("refreshFamily", "synthetic-history", family, 1);
+        await first.put("grant", family.grantId, { expiresAt: now + 1000 }, 1);
+        let releaseRenewal, renewalEntered, releaseDeletion, deletionEntered;
+        const renewalGate = new Promise((resolve) => { releaseRenewal = resolve; });
+        const renewalStarted = new Promise((resolve) => { renewalEntered = resolve; });
+        const deletionGate = new Promise((resolve) => { releaseDeletion = resolve; });
+        const deletionStarted = new Promise((resolve) => { deletionEntered = resolve; });
+        const replace = first.replace.bind(first);
+        first.replace = async (...args) => {
+          if (args[0] === "grant") {
+            renewalEntered();
+            await renewalGate;
+          }
+          return replace(...args);
+        };
+        const renewing = first.update("grant", family.grantId,
+          (grant) => ({ ...grant, expiresAt: now + 120000 }), 120);
+        await renewalStarted;
+        now += 2000;
+        const remove = second.remove.bind(second);
+        second.remove = async (...args) => {
+          if (args[0] === "grant") {
+            deletionEntered();
+            await deletionGate;
+          }
+          return remove(...args);
+        };
+        const collecting = operation === "get" ?
+          second.get("refreshFamily", "synthetic-history") : second.cleanupExpired();
+        await deletionStarted;
+        releaseRenewal();
+        assert.equal(await renewing, true);
+        releaseDeletion();
+        assert.deepEqual(await collecting, operation === "get" ? family : 0);
+        assert.deepEqual(await first.get("refreshFamily", "synthetic-history"), family);
+      });
+
+      it(`preserves concurrently replaced family metadata during retention ${operation} (${backend})`, async (t) => {
+        const { first, second, calls } = pair(backend);
+        t.after(() => { first.close(); second.close(); });
+        const family = { grantId: "synthetic-active", clientId: "synthetic-client" };
+        await first.put("grant", family.grantId, {}, 3600);
+        await first.put("refreshFamily", "synthetic-history", family, -1);
+        const replace = first.replace.bind(first);
+        let raced = false;
+        first.replace = async (...args) => {
+          if (!raced && args[0] === "refreshFamily") {
+            raced = true;
+            await second.put("refreshFamily", "synthetic-history", { ...family, generation: 2 }, 3600);
+          }
+          return replace(...args);
+        };
+        const result = operation === "get" ?
+          await first.get("refreshFamily", "synthetic-history") : await first.cleanupExpired();
+        assert.deepEqual(result, operation === "get" ? { ...family, generation: 2 } : 0);
+        assert.deepEqual(await second.get("refreshFamily", "synthetic-history"), { ...family, generation: 2 });
+        if (backend === "table") assert.ok(calls.updates.length > 0, "retention must use an ETag-conditional write");
+      });
+    }
+
     it(`collects expired-only rows in bounded batches, preserving live access, families and revocations (${backend})`, async (t) => {
       const { first, second, calls } = pair(backend);
       t.after(() => { first.close(); second.close(); });

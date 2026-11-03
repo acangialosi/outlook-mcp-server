@@ -47,6 +47,7 @@ describe("runtime compatibility contract", () => {
     const defaults = loadConfig(required);
     assert.equal(defaults.port, 8787);
     assert.equal(defaults.tableEndpoint, undefined);
+    assert.equal(defaults.trustProxy, false);
     for (const name of contract.environment.required) {
       const missing = { ...required };
       delete missing[name];
@@ -54,10 +55,13 @@ describe("runtime compatibility contract", () => {
     }
     const configured = loadConfig({ ...required, PORT: String(contract.runtime.port),
       AZURE_TABLE_ENDPOINT: "https://storage.example", AZURE_TABLE_NAME: "testtable",
-      ALLOWED_USERS: "USER@example.com" });
+      ALLOWED_USERS: "USER@example.com", TRUST_PROXY: "true" });
     assert.equal(configured.port, contract.runtime.port);
     assert.equal(configured.tableEndpoint, "https://storage.example");
     assert.equal(configured.tableName, "testtable");
+    assert.equal(configured.trustProxy, true);
+    assert.equal(loadConfig({ ...required, TRUST_PROXY: "false" }).trustProxy, false);
+    assert.throws(() => loadConfig({ ...required, TRUST_PROXY: "yes" }), /TRUST_PROXY/);
     assert.deepEqual([...configured.allowedUsers], ["user@example.com"]);
     for (const PORT of ["0", "65536", "not-a-port"]) assert.throws(() => loadConfig({ ...required, PORT }), /PORT/);
     const dockerfile = await readFile(new URL("../Dockerfile", import.meta.url), "utf8");

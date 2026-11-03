@@ -1,3 +1,4 @@
+import { isIP } from "node:net";
 import {
   createMcpHandler,
   getOAuthProtectedResourceMetadataUrl,
@@ -43,12 +44,12 @@ function withHeaders(response: Response, headers: Record<string, string>): Respo
   return result;
 }
 
-function clientIp(request: Request): string {
-  // Azure Container Apps' ingress appends the caller's address to X-Forwarded-For.
-  return request.headers.get("x-forwarded-for")?.split(",").at(-1)?.trim() || "local";
+function clientIp(request: Request, remoteAddress: string | undefined, trustProxy: boolean): string {
+  const forwarded = trustProxy ? request.headers.get("x-forwarded-for")?.split(",").at(-1)?.trim() : undefined;
+  return forwarded && isIP(forwarded) ? forwarded : remoteAddress || "local";
 }
 
-export function createApp(config: Config, oauth: OAuthServer): (request: Request) => Promise<Response> {
+export function createApp(config: Config, oauth: OAuthServer): (request: Request, remoteAddress?: string) => Promise<Response> {
   const mcpUrl = new URL(config.mcpUrl);
   const resourceMetadataUrl = getOAuthProtectedResourceMetadataUrl(mcpUrl);
   const metadataOptions = {
@@ -68,7 +69,7 @@ export function createApp(config: Config, oauth: OAuthServer): (request: Request
   const strict = new RateLimiter(30, 60 * 60 * 1000); // registrations and consent pages
   const tokens = new RateLimiter(120, 60 * 1000);
 
-  return async (request: Request): Promise<Response> => {
+  return async (request: Request, remoteAddress?: string): Promise<Response> => {
     const { pathname } = new URL(request.url);
     const method = request.method;
     const tooMany = () => new Response("Too many requests", { status: 429, headers: { "Retry-After": "60" } });
@@ -86,17 +87,17 @@ export function createApp(config: Config, oauth: OAuthServer): (request: Request
       if (pathname === "/register") {
         if (method === "OPTIONS") return new Response(null, { status: 204, headers: CORS });
         if (method !== "POST") return new Response(null, { status: 405, headers: { Allow: "POST" } });
-        if (!strict.allow(clientIp(request))) return tooMany();
+        if (!strict.allow(clientIp(request, remoteAddress, config.trustProxy))) return tooMany();
         return withHeaders(await oauth.register(request), CORS);
       }
       if (pathname === "/token") {
         if (method === "OPTIONS") return new Response(null, { status: 204, headers: CORS });
         if (method !== "POST") return new Response(null, { status: 405, headers: { Allow: "POST" } });
-        if (!tokens.allow(clientIp(request))) return tooMany();
+        if (!tokens.allow(clientIp(request, remoteAddress, config.trustProxy))) return tooMany();
         return withHeaders(await oauth.token(request), CORS);
       }
       if (pathname === "/authorize" && method === "GET") {
-        if (!strict.allow(clientIp(request))) return tooMany();
+        if (!strict.allow(clientIp(request, remoteAddress, config.trustProxy))) return tooMany();
         return await oauth.authorize(request);
       }
       if (pathname === "/authorize/consent" && method === "POST") return await oauth.consent(request);

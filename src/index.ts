@@ -16,7 +16,10 @@ if (!config.tableEndpoint) console.warn("AZURE_TABLE_ENDPOINT not set: using in-
 const entra = new EntraClient(config.entraClientId, config.entraClientSecret, `${config.publicUrl}/oauth/callback`);
 const app = createApp(config, new OAuthServer(config, store, entra));
 
-const server = serve({ fetch: app, port: config.port }, ({ port }) => {
+const server = serve({
+  fetch: (request, bindings) => app(request, bindings.incoming.socket.remoteAddress),
+  port: config.port,
+}, ({ port }) => {
   console.log(`Outlook MCP server listening on :${port} — endpoint ${config.mcpUrl}`);
 });
 

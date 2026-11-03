@@ -186,6 +186,41 @@ describe("upstream OIDC claim validation", () => {
 });
 
 describe("persistent refresh-token family revocation", () => {
+  for (const backend of ["memory", "table"]) {
+    it(`detects day31 replay of a day29-rotated token across OAuth instances (${backend})`, async (t) => {
+      let now = Date.now();
+      t.mock.method(Date, "now", () => now);
+      const day = 24 * 60 * 60 * 1000;
+      const sealer = new Sealer(randomBytes(32));
+      const table = tableFixture();
+      const store = backend === "memory" ? new MemoryStore(sealer) : new TableStore(sealer, table);
+      const shared = backend === "memory" ? store : new TableStore(sealer, table);
+      t.after(() => { store.close(); shared.close(); });
+      const { oauth, config } = setup(fakeEntra(), store);
+      const replica = new OAuthServer(config, shared, fakeEntra());
+      const session = await signIn(oauth);
+      const originalHash = hashToken(session.tokens.refresh_token);
+      now += 29 * day;
+      const rotated = await refresh(replica, session);
+      assert.equal(rotated.status, 200);
+      const replacement = await rotated.json();
+      now += 2 * day;
+      const renewed = await refresh(replica, session, replacement.refresh_token);
+      assert.equal(renewed.status, 200);
+      const latest = await renewed.json();
+      const grantId = (await replica.verifyAccessToken(latest.access_token)).extra.grantId;
+      assert.ok((await shared.read("refreshFamily", originalHash)).expiresAt <= now,
+        "no intervening read or cleanup may extend the original association before replay");
+      assert.equal((await refresh(oauth, session)).status, 400);
+      for (const server of [oauth, replica]) {
+        await assert.rejects(server.verifyAccessToken(latest.access_token));
+        assert.equal((await refresh(server, session, latest.refresh_token)).status, 400);
+        assert.equal((await refresh(server, session, replacement.refresh_token)).status, 400);
+      }
+      assert.ok(await store.get("revoked", grantId));
+    });
+  }
+
   it("revokes attacker replacements and old access on legitimate reuse across instances, not unrelated grants", async () => {
     const { oauth, store, config } = setup();
     const session = await signIn(oauth);
@@ -193,7 +228,7 @@ describe("persistent refresh-token family revocation", () => {
     const replica = new OAuthServer(config, store, otherEntra);
     const unrelated = await signIn(replica, "other@example.com");
     const grantId = (await oauth.verifyAccessToken(session.tokens.access_token)).extra.grantId;
-    await oauth.graphAccessToken(grantId); // Populate this instance's Graph cache.
+    await oauth.graphAccessToken(grantId);
     const stolen = await refresh(replica, session);
     assert.equal(stolen.status, 200);
     const replacement = await stolen.json();
@@ -236,6 +271,22 @@ describe("persistent refresh-token family revocation", () => {
     const replacement = await response.json();
     assert.equal((await refresh(oauth, session)).status, 400);
     await assert.rejects(oauth.verifyAccessToken(replacement.access_token));
+  });
+
+  it("uses the current persisted Graph token rather than retaining a stale per-instance cache", async (t) => {
+    const entra = fakeEntra();
+    entra.refresh = async () => { throw new Error("Unexpired persisted tokens do not need upstream refresh."); };
+    const { oauth, store } = setup(entra);
+    t.after(() => store.close());
+    const session = await signIn(oauth);
+    const grantId = (await oauth.verifyAccessToken(session.tokens.access_token)).extra.grantId;
+    assert.equal(await oauth.graphAccessToken(grantId), "synthetic-graph-access");
+    await store.update("grant", grantId, (grant) => ({
+      ...grant, upstreamAccessToken: "synthetic-new-persisted-access", upstreamAccessTokenExpiresAt: Date.now() + 3600_000,
+    }), 3600);
+    assert.equal(await oauth.graphAccessToken(grantId), "synthetic-new-persisted-access");
+    await store.delete("grant", grantId);
+    await assert.rejects(oauth.graphAccessToken(grantId), ReconnectRequiredError);
   });
 
   it("does not allow a deferred upstream refresh to resurrect a revoked grant", async () => {
@@ -310,6 +361,42 @@ describe("persistent refresh-token family revocation", () => {
   });
 
   for (const backend of ["memory", "table"]) {
+    it(`revokes a concurrent legacy migration winner when the loser misses its consumed refresh row (${backend})`, async (t) => {
+      const sealer = new Sealer(randomBytes(32));
+      const table = tableFixture();
+      const store = backend === "memory" ? new MemoryStore(sealer) : new TableStore(sealer, table);
+      const otherStore = backend === "memory" ? store : new TableStore(sealer, table);
+      t.after(() => { store.close(); otherStore.close(); });
+      const { oauth, config } = setup(fakeEntra(), store);
+      const session = await signIn(oauth);
+      const key = hashToken(session.tokens.refresh_token);
+      await store.delete("refreshFamily", key);
+      let release;
+      let entered;
+      const pending = new Promise((resolve) => { release = resolve; });
+      const started = new Promise((resolve) => { entered = resolve; });
+      const get = store.get.bind(store);
+      let deferred = true;
+      store.get = async (kind, tokenKey) => {
+        if (kind === "refresh" && tokenKey === key && deferred) {
+          deferred = false;
+          entered();
+          await pending;
+        }
+        return get(kind, tokenKey);
+      };
+      const losing = refresh(oauth, session);
+      await started;
+      const replica = new OAuthServer(config, otherStore, fakeEntra());
+      const winner = await refresh(replica, session);
+      assert.equal(winner.status, 200);
+      const replacement = await winner.json();
+      release();
+      assert.equal((await losing).status, 400);
+      await assert.rejects(replica.verifyAccessToken(replacement.access_token));
+      assert.equal((await refresh(replica, session, replacement.refresh_token)).status, 400);
+    });
+
     it(`preserves concurrent upstream credentials during a deferred MCP renewal (${backend})`, async () => {
       const sealer = new Sealer(randomBytes(32));
       const table = tableFixture();

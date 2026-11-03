@@ -7,7 +7,7 @@
   },
   "environment": {
     "required": ["PUBLIC_URL", "ENTRA_CLIENT_ID", "ENTRA_CLIENT_SECRET", "TOKEN_ENCRYPTION_KEY"],
-    "optional": ["PORT", "AZURE_TABLE_ENDPOINT", "AZURE_TABLE_NAME", "ALLOWED_USERS"]
+    "optional": ["PORT", "AZURE_TABLE_ENDPOINT", "AZURE_TABLE_NAME", "ALLOWED_USERS", "TRUST_PROXY"]
   },
   "graph": {
     "scopes": [

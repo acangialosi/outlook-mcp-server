@@ -33,6 +33,8 @@ export interface Config {
   /** Azure Table endpoint (https://<account>.table.core.windows.net), or undefined for in-memory dev storage. */
   tableEndpoint?: string;
   tableName: string;
+  /** Trust the last forwarded address only behind an exclusively controlled proxy. */
+  trustProxy: boolean;
   /** If set, only these personal Microsoft accounts (lowercase emails) may connect. */
   allowedUsers?: Set<string>;
 }
@@ -50,6 +52,7 @@ const schema = z.object({
   AZURE_TABLE_ENDPOINT: z.url().optional(),
   AZURE_TABLE_NAME: z.string().regex(/^[A-Za-z][A-Za-z0-9]{2,62}$/).default("outlookmcp"),
   ALLOWED_USERS: z.string().optional(),
+  TRUST_PROXY: z.enum(["true", "false"]).default("false"),
 });
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
@@ -69,6 +72,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     encryptionKey: Buffer.from(value.TOKEN_ENCRYPTION_KEY, "base64"),
     ...(value.AZURE_TABLE_ENDPOINT ? { tableEndpoint: value.AZURE_TABLE_ENDPOINT } : {}),
     tableName: value.AZURE_TABLE_NAME,
+    trustProxy: value.TRUST_PROXY === "true",
     ...(value.ALLOWED_USERS?.trim() ? {
       allowedUsers: new Set(value.ALLOWED_USERS.split(",").map((u) => u.trim().toLowerCase()).filter(Boolean)),
     } : {}),

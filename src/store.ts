@@ -5,7 +5,8 @@ import { Sealer } from "./crypto.js";
 export type Kind = "client" | "txn" | "grant" | "code" | "access" | "refresh" | "refreshFamily" | "revoked";
 
 /**
- * Expiring key-value storage. Every value is JSON, encrypted with AES-GCM and bound to
+ * Expiring key-value storage; refresh-family expiry is a review deadline while its grant is live.
+ * Every value is JSON, encrypted with AES-GCM and bound to
  * its kind and key, so a storage leak exposes neither mailbox tokens nor client secrets.
  */
 export interface Store {
@@ -66,11 +67,48 @@ abstract class SealedStore implements Store {
     });
   }
 
+  private async familyRetentionUntil(key: string, row: Row): Promise<number | undefined> {
+    const family = JSON.parse(this.sealer.open(row.sealed, `refreshFamily/${key}`)) as { grantId?: string };
+    if (typeof family.grantId !== "string") return undefined;
+    for (let attempt = 0; attempt < 8; attempt++) {
+      const grant = await this.read("grant", family.grantId);
+      const revoked = await this.read("revoked", family.grantId);
+      if (!grant || (revoked && revoked.expiresAt > Date.now())) return undefined;
+      const value = JSON.parse(this.sealer.open(grant.sealed, `grant/${family.grantId}`)) as { expiresAt?: number };
+      const expiresAt = Math.min(grant.expiresAt, value.expiresAt ?? Infinity);
+      if (expiresAt > Date.now()) return expiresAt;
+      // Fence delayed CAS renewals before discarding their historical relationships.
+      if (await this.remove("grant", family.grantId, grant)) return undefined;
+    }
+    throw new Error("Storage family lifecycle conflict retry limit exceeded.");
+  }
+
+  protected async collectExpired(kind: Kind, key: string, row: Row): Promise<boolean> {
+    if (kind === "refreshFamily") {
+      const expiresAt = await this.familyRetentionUntil(key, row);
+      if (expiresAt !== undefined) {
+        await this.replace(kind, key, row, { sealed: row.sealed, expiresAt });
+        return false;
+      }
+    }
+    return this.remove(kind, key, row);
+  }
+
+  private async liveRow(kind: Kind, key: string): Promise<Row | undefined> {
+    for (let attempt = 0; attempt < 8; attempt++) {
+      const row = await this.read(kind, key);
+      if (!row || row.expiresAt > Date.now()) return row;
+      if (await this.collectExpired(kind, key, row) || kind !== "refreshFamily") return undefined;
+      // Reread after retention or an ETag conflict, including the replacement ETag.
+    }
+    throw new Error("Storage family retention conflict retry limit exceeded.");
+  }
+
   async update<T extends object>(kind: Kind, key: string, change: (value: T) => T, ttlSeconds: number): Promise<boolean> {
     const expiresAt = Date.now() + ttlSeconds * 1000;
     for (let attempt = 0; attempt < 8; attempt++) {
-      const row = await this.read(kind, key);
-      if (!row || row.expiresAt <= Date.now()) return false;
+      const row = await this.liveRow(kind, key);
+      if (!row) return false;
       const value = JSON.parse(this.sealer.open(row.sealed, `${kind}/${key}`)) as T;
       const next = {
         sealed: this.sealer.seal(JSON.stringify(change(value)), `${kind}/${key}`),
@@ -82,22 +120,14 @@ abstract class SealedStore implements Store {
   }
 
   async get<T>(kind: Kind, key: string): Promise<T | undefined> {
-    const row = await this.read(kind, key);
+    const row = await this.liveRow(kind, key);
     if (!row) return undefined;
-    if (row.expiresAt <= Date.now()) {
-      await this.remove(kind, key, row);
-      return undefined;
-    }
     return JSON.parse(this.sealer.open(row.sealed, `${kind}/${key}`)) as T;
   }
 
   async take<T>(kind: Kind, key: string): Promise<T | undefined> {
-    const row = await this.read(kind, key);
+    const row = await this.liveRow(kind, key);
     if (!row) return undefined;
-    if (row.expiresAt <= Date.now()) {
-      await this.remove(kind, key, row);
-      return undefined;
-    }
     return await this.remove(kind, key, row) ?
       JSON.parse(this.sealer.open(row.sealed, `${kind}/${key}`)) as T : undefined;
   }
@@ -109,7 +139,7 @@ abstract class SealedStore implements Store {
 
 export class MemoryStore extends SealedStore {
   private readonly rows = new Map<string, Row>();
-  private cleanupCursor: MapIterator<[string, Row]> | undefined;
+  private cleanupCursor: { entries: MapIterator<[string, Row]>; remaining: number } | undefined;
 
   protected async write(kind: Kind, key: string, row: Row): Promise<void> {
     this.rows.set(`${kind}/${key}`, row);
@@ -133,20 +163,23 @@ export class MemoryStore extends SealedStore {
   }
 
   protected async cleanupBatch(): Promise<number> {
-    this.cleanupCursor ??= this.rows.entries();
+    // Map iterators include future insertions; cap each sweep at its initial population.
+    const cursor = this.cleanupCursor ??= { entries: this.rows.entries(), remaining: this.rows.size };
     const cutoff = Date.now();
     let removed = 0;
-    for (let scanned = 0; scanned < CLEANUP_BATCH_SIZE; scanned++) {
-      const entry = this.cleanupCursor.next();
+    for (let scanned = 0; scanned < CLEANUP_BATCH_SIZE && cursor.remaining > 0; scanned++) {
+      const entry = cursor.entries.next();
       if (entry.done) {
-        this.cleanupCursor = undefined;
+        cursor.remaining = 0;
         break;
       }
+      cursor.remaining--;
       const [id, row] = entry.value;
       if (row.expiresAt > cutoff) continue;
       const separator = id.indexOf("/");
-      if (await this.remove(id.slice(0, separator) as Kind, id.slice(separator + 1), row)) removed++;
+      if (await this.collectExpired(id.slice(0, separator) as Kind, id.slice(separator + 1), row)) removed++;
     }
+    if (cursor.remaining === 0) this.cleanupCursor = undefined;
     return removed;
   }
 }
@@ -223,7 +256,7 @@ export class TableStore extends SealedStore {
     if (!done) {
       for (const entity of page) {
         if (Number(entity.expiresAt) <= cursor.cutoff &&
-            await this.remove(entity.partitionKey as Kind, entity.rowKey!, {
+            await this.collectExpired(entity.partitionKey as Kind, entity.rowKey!, {
               sealed: entity.sealed, expiresAt: Number(entity.expiresAt), etag: entity.etag,
             })) removed++;
       }

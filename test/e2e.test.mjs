@@ -312,8 +312,7 @@ describe("end-to-end", () => {
     const { body } = await exchange(app, client, code, verifier);
     const info = await oauth.verifyAccessToken(body.access_token);
     ms.failRefresh();
-    // Force the cached Graph token to look expired.
-    oauth["graphTokens"].clear();
+    // Expire the persisted Graph token so Microsoft must refresh it.
     const grant = await oauth["store"].get("grant", info.extra.grantId);
     await oauth["store"].put("grant", info.extra.grantId, { ...grant, upstreamAccessTokenExpiresAt: 0 }, 60);
     await assert.rejects(oauth.graphAccessToken(info.extra.grantId), /Reconnect/);
@@ -449,7 +448,6 @@ describe("write tools", () => {
     const grant = await store.get("grant", info.extra.grantId);
     const { version, ...legacy } = grant; // a grant written before scope versioning
     await store.put("grant", info.extra.grantId, legacy, 60);
-    oauth["graphTokens"].clear();
     await assert.rejects(oauth.verifyAccessToken(accessToken), /Invalid or expired/);
     assert.equal(await store.get("grant", info.extra.grantId), undefined, "legacy grant discarded");
   });

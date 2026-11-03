@@ -212,7 +212,6 @@ export class OAuthServer implements OAuthTokenVerifier {
   readonly metadata: OAuthMetadata;
   private readonly cookiePrefix: string;
   private readonly secureCookie: string;
-  private readonly graphTokens = new Map<string, { token: string; expiresAt: number }>();
   private readonly refreshing = new Map<string, Promise<string>>();
 
   constructor(
@@ -436,7 +435,9 @@ export class OAuthServer implements OAuthTokenVerifier {
       if (!family && token) {
         // Upgrade still-live tokens issued before persistent reuse tracking.
         family = await this.store.get<RefreshRecord>("refresh", key);
-        if (family?.clientId === client.clientId) {
+        if (!family) {
+          family = await this.store.get<RefreshRecord>("refreshFamily", key);
+        } else if (family.clientId === client.clientId) {
           await this.store.put("refreshFamily", key, family, TTL.refresh);
         }
       }
@@ -463,7 +464,7 @@ export class OAuthServer implements OAuthTokenVerifier {
     const accessToken = randomToken();
     const refreshToken = randomToken();
     const expiresAt = Math.floor(Date.now() / 1000) + TTL.access;
-    // Keep the hashed token's family after atomic consumption, including across replicas.
+    // Family expiry triggers a storage lifecycle review, retaining hashes for the entire live session.
     await this.store.put("refreshFamily", hashToken(refreshToken), { grantId, clientId } satisfies RefreshRecord, TTL.refresh);
     await this.store.put("access", hashToken(accessToken), { grantId, clientId, expiresAt } satisfies AccessRecord, TTL.access);
     await this.store.put("refresh", hashToken(refreshToken), { grantId, clientId } satisfies RefreshRecord, TTL.refresh);
@@ -520,23 +521,19 @@ export class OAuthServer implements OAuthTokenVerifier {
 
   /** Returns a Microsoft Graph access token for the grant, refreshing it with Microsoft when needed. */
   async graphAccessToken(grantId: string): Promise<string> {
-    if (!await this.currentGrant(grantId)) throw new ReconnectRequiredError();
-    const cached = this.graphTokens.get(grantId);
-    if (cached && cached.expiresAt - Date.now() > 120_000) return cached.token;
+    const grant = await this.currentGrant(grantId);
+    if (!grant) throw new ReconnectRequiredError();
     let pending = this.refreshing.get(grantId);
     if (!pending) {
-      pending = this.loadGraphToken(grantId).finally(() => this.refreshing.delete(grantId));
+      pending = this.loadGraphToken(grantId, grant).finally(() => this.refreshing.delete(grantId));
       this.refreshing.set(grantId, pending);
     }
     return pending;
   }
 
-  private async loadGraphToken(grantId: string): Promise<string> {
+  private async loadGraphToken(grantId: string, grant: GrantRecord): Promise<string> {
     const expiresAt = Date.now() + TTL.grant * 1000;
-    const grant = await this.currentGrant(grantId);
-    if (!grant) throw new ReconnectRequiredError();
     if (grant.upstreamAccessToken && (grant.upstreamAccessTokenExpiresAt ?? 0) - Date.now() > 120_000) {
-      this.graphTokens.set(grantId, { token: grant.upstreamAccessToken, expiresAt: grant.upstreamAccessTokenExpiresAt! });
       return grant.upstreamAccessToken;
     }
     let tokens;
@@ -557,7 +554,6 @@ export class OAuthServer implements OAuthTokenVerifier {
       upstreamAccessTokenExpiresAt: tokens.accessTokenExpiresAt,
     }), TTL.grant);
     if (!updated || !await this.currentGrant(grantId)) throw new ReconnectRequiredError();
-    this.graphTokens.set(grantId, { token: tokens.accessToken, expiresAt: tokens.accessTokenExpiresAt });
     return tokens.accessToken;
   }
 
@@ -567,7 +563,6 @@ export class OAuthServer implements OAuthTokenVerifier {
     // Never delete this marker while stale requests can still write a usable grant.
     await this.store.put("revoked", grantId, {}, TTL.grant + TTL.refresh);
     await this.store.delete("grant", grantId);
-    this.graphTokens.delete(grantId);
   }
 
   /** Persistent revocation is authoritative even if an in-flight writer restores the grant row. */

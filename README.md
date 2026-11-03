@@ -33,9 +33,12 @@ Do not commit the resulting values. Point an OAuth-capable MCP client at `http:/
 | `AZURE_TABLE_ENDPOINT` | Optional; Azure Table storage using default Azure credentials/managed identity |
 | `AZURE_TABLE_NAME` | Optional; default `outlookmcp` |
 | `ALLOWED_USERS` | Optional comma-separated account addresses; absent permits any personal account |
+| `TRUST_PROXY` | Optional `true` or `false`; default `false`, rate limits use the connection address |
 
 Without Table storage, encrypted in-memory storage is used and sign-ins disappear on restart.
 Do not use the development memory store for durable production sessions.
+Set `TRUST_PROXY=true` only when all traffic arrives through a controlled reverse proxy that appends the
+real client IP as the last `X-Forwarded-For` address. Do not expose that backend directly to clients.
 
 ## Tools
 
