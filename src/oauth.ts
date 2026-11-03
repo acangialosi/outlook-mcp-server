@@ -329,7 +329,7 @@ export class OAuthServer implements OAuthTokenVerifier {
 <h1>Connect your Outlook.com account</h1>
 <p><strong>${escapeHtml(name)}</strong> wants access to your personal Outlook.com:</p>
 <ul><li>Profile</li><li>Mail: read, search, move between folders, mark read or unread, flag, categorize, and report as not junk</li><li>Mail folders: create</li><li>Calendar events (read)</li><li>Contacts (read)</li></ul>
-<p class="muted">It cannot send or delete mail, rename or delete folders, or change calendar events or contacts.</p>
+<p class="muted">It cannot send or permanently delete mail, rename or delete folders, or change calendar events or contacts. Moving mail to Deleted Items is reversible.</p>
 <p class="muted">After approval you will return to <code>${escapeHtml(host)}</code>. Only continue if you started this connection from that app.</p>
 <form method="post" action="/authorize/consent">
 <input type="hidden" name="txn" value="${escapeHtml(txnId)}">
@@ -449,7 +449,10 @@ export class OAuthServer implements OAuthTokenVerifier {
       if (record.clientId !== client.clientId) return oauthError("invalid_grant", "Invalid or expired refresh token.");
       const grant = await this.currentGrant(record.grantId);
       if (!grant) return oauthError("invalid_grant", "The authorization was revoked. Sign in again.");
-      await this.store.put("grant", record.grantId, { ...grant, expiresAt }, TTL.grant);
+      if (!await this.store.update<GrantRecord>("grant", record.grantId,
+        (latest) => ({ ...latest, expiresAt: Math.max(latest.expiresAt ?? 0, expiresAt) }), TTL.grant)) {
+        return oauthError("invalid_grant", "The authorization was revoked. Sign in again.");
+      }
       return this.issueTokens(record.grantId, client.clientId);
     }
     return oauthError("unsupported_grant_type", "Use authorization_code or refresh_token.");
@@ -482,8 +485,13 @@ export class OAuthServer implements OAuthTokenVerifier {
       const decoded = Buffer.from(header.slice(6).trim(), "base64").toString("utf8");
       const index = decoded.indexOf(":");
       if (index < 0) return oauthError("invalid_client", "Malformed client credentials.", 401);
-      clientId = decodeURIComponent(decoded.slice(0, index));
-      secret = decodeURIComponent(decoded.slice(index + 1));
+      try {
+        clientId = decodeURIComponent(decoded.slice(0, index));
+        secret = decodeURIComponent(decoded.slice(index + 1));
+      } catch (error) {
+        if (!(error instanceof URIError)) throw error;
+        return oauthError("invalid_client", "Malformed client credentials.", 401);
+      }
     }
     const client = clientId ? await this.store.get<ClientRecord>("client", clientId) : undefined;
     if (!client) return oauthError("invalid_client", "Unknown client.", 401);
@@ -541,14 +549,14 @@ export class OAuthServer implements OAuthTokenVerifier {
       }
       throw error;
     }
-    await this.store.put("grant", grantId, {
-      ...grant,
-      expiresAt,
-      upstreamRefreshToken: tokens.refreshToken ?? grant.upstreamRefreshToken,
+    const updated = await this.store.update<GrantRecord>("grant", grantId, (latest) => ({
+      ...latest,
+      expiresAt: Math.max(latest.expiresAt ?? 0, expiresAt),
+      upstreamRefreshToken: tokens.refreshToken ?? latest.upstreamRefreshToken,
       upstreamAccessToken: tokens.accessToken,
       upstreamAccessTokenExpiresAt: tokens.accessTokenExpiresAt,
-    } satisfies GrantRecord, TTL.grant);
-    if (!await this.currentGrant(grantId)) throw new ReconnectRequiredError();
+    }), TTL.grant);
+    if (!updated || !await this.currentGrant(grantId)) throw new ReconnectRequiredError();
     this.graphTokens.set(grantId, { token: tokens.accessToken, expiresAt: tokens.accessTokenExpiresAt });
     return tokens.accessToken;
   }

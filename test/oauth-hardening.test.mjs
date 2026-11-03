@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { randomBytes } from "node:crypto";
 import { describe, it } from "node:test";
+import { RestError } from "@azure/data-tables";
 import { MSA_TENANT_ID, loadConfig } from "../dist/config.js";
 import { hashToken, pkceChallenge, Sealer } from "../dist/crypto.js";
 import { OAuthServer, ReconnectRequiredError } from "../dist/oauth.js";
@@ -87,6 +88,65 @@ async function refresh(oauth, session, token = session.tokens.refresh_token) {
     grant_type: "refresh_token", client_id: session.clientId, refresh_token: token,
   }));
 }
+
+function tableFixture() {
+  const rows = new Map();
+  let version = 0;
+  const failure = (statusCode) => new RestError("Synthetic storage conflict", { statusCode });
+  return {
+    async createTable() {},
+    async upsertEntity(entity) {
+      rows.set(`${entity.partitionKey}/${entity.rowKey}`, { ...entity, etag: `${++version}` });
+    },
+    async getEntity(kind, key) {
+      const row = rows.get(`${kind}/${key}`);
+      if (!row) throw failure(404);
+      return { ...row };
+    },
+    async updateEntity(entity, mode, options) {
+      const id = `${entity.partitionKey}/${entity.rowKey}`;
+      const row = rows.get(id);
+      if (!row) throw failure(404);
+      assert.equal(mode, "Replace");
+      if (row.etag !== options.etag) throw failure(412);
+      rows.set(id, { ...entity, etag: `${++version}` });
+    },
+    async deleteEntity(kind, key, options) {
+      const id = `${kind}/${key}`;
+      const row = rows.get(id);
+      if (!row) throw failure(404);
+      if (options.etag && row.etag !== options.etag) throw failure(412);
+      rows.delete(id);
+    },
+  };
+}
+
+describe("OAuth Basic client credentials", () => {
+  it("returns invalid_client for malformed percent escapes in either field", async () => {
+    const { oauth } = setup();
+    for (const credentials of ["bad%:synthetic-secret", `${CLIENT_ID}:bad%E0%A4%A`]) {
+      const request = form("/token", { grant_type: "refresh_token" });
+      request.headers.set("authorization", `Basic ${Buffer.from(credentials).toString("base64")}`);
+      const response = await oauth.token(request);
+      assert.equal(response.status, 401);
+      assert.equal((await response.json()).error, "invalid_client");
+    }
+  });
+
+  it("accepts correctly percent-encoded confidential client IDs and secrets", async () => {
+    const { oauth, store } = setup();
+    const clientId = "synthetic:client";
+    const secret = "synthetic:secret%with/slashes";
+    await store.put("client", clientId, {
+      clientId, authMethod: "client_secret_basic", secretHash: hashToken(secret), redirectUris: [REDIRECT], issuedAt: 0,
+    }, 60);
+    const request = form("/token", { grant_type: "unsupported" });
+    request.headers.set("authorization", `Basic ${Buffer.from(`${encodeURIComponent(clientId)}:${encodeURIComponent(secret)}`).toString("base64")}`);
+    const response = await oauth.token(request);
+    assert.equal(response.status, 400);
+    assert.equal((await response.json()).error, "unsupported_grant_type");
+  });
+});
 
 describe("upstream OIDC claim validation", () => {
   it("accepts personal accounts and correctly authorized audience arrays", async () => {
@@ -218,15 +278,15 @@ describe("persistent refresh-token family revocation", () => {
     let started;
     const pending = new Promise((resolve) => { release = resolve; });
     const entered = new Promise((resolve) => { started = resolve; });
-    const put = store.put.bind(store);
+    const replace = store.replace.bind(store);
     let defer = true;
-    store.put = async (kind, key, value, ttl) => {
+    store.replace = async (kind, key, expected, row) => {
       if (kind === "grant" && defer) {
         defer = false;
         started();
         await pending;
       }
-      return put(kind, key, value, ttl);
+      return replace(kind, key, expected, row);
     };
     const rotating = refresh(oauth, session);
     await entered;
@@ -238,21 +298,7 @@ describe("persistent refresh-token family revocation", () => {
   });
 
   it("consumes a Table-backed token only once across store instances", async () => {
-    const rows = new Map();
-    const { RestError } = await import("@azure/data-tables");
-    const missing = () => new RestError("Not found", { statusCode: 404 });
-    const table = {
-      async createTable() {},
-      async upsertEntity(entity) { rows.set(`${entity.partitionKey}/${entity.rowKey}`, entity); },
-      async getEntity(kind, key) {
-        const row = rows.get(`${kind}/${key}`);
-        if (!row) throw missing();
-        return { ...row };
-      },
-      async deleteEntity(kind, key) {
-        if (!rows.delete(`${kind}/${key}`)) throw missing();
-      },
-    };
+    const table = tableFixture();
     const sealer = new Sealer(randomBytes(32));
     const a = new TableStore(sealer, table);
     const b = new TableStore(sealer, table);
@@ -262,6 +308,54 @@ describe("persistent refresh-token family revocation", () => {
     assert.equal(results.filter(Boolean).length, 1);
     assert.equal(await b.get("refresh", key), undefined);
   });
+
+  for (const backend of ["memory", "table"]) {
+    it(`preserves concurrent upstream credentials during a deferred MCP renewal (${backend})`, async () => {
+      const sealer = new Sealer(randomBytes(32));
+      const table = tableFixture();
+      const store = backend === "memory" ? new MemoryStore(sealer) : new TableStore(sealer, table);
+      const otherStore = backend === "memory" ? store : new TableStore(sealer, table);
+      const entra = fakeEntra();
+      entra.refresh = async () => ({
+        accessToken: "synthetic-updated-graph-access",
+        refreshToken: "synthetic-updated-graph-refresh",
+        accessTokenExpiresAt: Date.now() + 3600_000,
+      });
+      const { oauth, config } = setup(entra, store);
+      const session = await signIn(oauth);
+      const grantId = (await oauth.verifyAccessToken(session.tokens.access_token)).extra.grantId;
+      const grant = await store.get("grant", grantId);
+      await store.put("grant", grantId, { ...grant, upstreamAccessTokenExpiresAt: 0 }, 3600);
+      let release;
+      let started;
+      const pending = new Promise((resolve) => { release = resolve; });
+      const entered = new Promise((resolve) => { started = resolve; });
+      const replace = store.replace.bind(store);
+      let defer = true;
+      store.replace = async (...args) => {
+        if (args[0] === "grant" && defer) {
+          defer = false;
+          started();
+          await pending;
+        }
+        return replace(...args);
+      };
+      const rotating = refresh(oauth, session);
+      await entered;
+      const replica = new OAuthServer(config, otherStore, entra);
+      assert.equal(await replica.graphAccessToken(grantId), "synthetic-updated-graph-access");
+      release();
+      assert.equal((await rotating).status, 200);
+      const latest = await store.get("grant", grantId);
+      assert.equal(latest.upstreamRefreshToken, "synthetic-updated-graph-refresh");
+      assert.equal(latest.upstreamAccessToken, "synthetic-updated-graph-access");
+      assert.ok(latest.expiresAt >= grant.expiresAt);
+      const renewedRow = await store.read("grant", grantId);
+      assert.ok(renewedRow.expiresAt > Date.now() + 89 * 24 * 3600_000, "MCP renewal preserves the sliding lifetime");
+      store.close();
+      otherStore.close();
+    });
+  }
 });
 
 function streamed(path, bytes, chunkSize = 1024) {
