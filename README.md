@@ -3,7 +3,6 @@
 A Streamable HTTP MCP server for personal Outlook.com, Hotmail and Live accounts, using Microsoft Graph.
 Each user signs into their own account. Work/school accounts are rejected.
 
-**Publication is pending explicit owner approval; keep repository visibility PRIVATE.**
 Production deployment is private and separately managed. This source repository contains no deployment
 authority or production configuration.
 
