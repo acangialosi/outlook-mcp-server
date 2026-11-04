@@ -10,6 +10,8 @@ This application repository is already public with owner approval, not a private
 - `npm test` builds TypeScript and runs fake-Entra/Graph end-to-end, runtime-contract and hygiene tests.
   A fresh checkout needs `npm ci` first, but no `.env`, live tenant, mailbox or credentials for tests.
   Tests must model real Graph URL shapes; never weaken assertions to pass a change.
+- Scanner-maintenance changes also require the Python stdlib updater/proposal regression tests
+  documented in README; these use mocks/local Git fixtures without network or credentials.
 - CI requires `test`, `docker`, and `security`. Security includes npm audit (moderate or higher),
   gitleaks across all refs/history/commit messages, Semgrep, and planted-problem self-tests.
 - Gitleaks exceptions belong only in `.gitleaks.toml`: exact reviewed public values, never broad patterns.

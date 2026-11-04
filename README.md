@@ -26,6 +26,16 @@ use mocks/in-memory storage (including a loopback HTTP test), not a live tenant 
 Do not create `.env`, register an Entra application or sign into Azure to run them.
 CI's `test` job runs these same two commands.
 
+For scanner-maintenance changes, also use Python 3 and Git to run the stdlib regression tests:
+
+```powershell
+python -I -B -m unittest discover -s scripts -p 'test_*security_tool*.py' -v
+```
+
+These maintenance-specific tests mock release downloads and issue APIs and use local Git fixtures;
+they require no network, `.env`, tenant, mailbox or credentials. CI runs them alongside, not instead of,
+the primary `npm test` application suite.
+
 ## Live local setup (credentials required)
 
 After `npm ci`, the live server needs your own Entra application and local secrets; this is separate
@@ -123,12 +133,16 @@ and commit messages, rejects shallow clones and ignores inline allow comments. C
 Semgrep runs with metrics disabled. The tool-update script verifies release checksums before changing
 pinned gitleaks versions; Dependabot maintains npm, Action and container pins.
 
-Planned scanner pin automation is proposal-only: trusted-main analysis would publish a deduplicated issue
-with a verified, allowlisted patch and exact base commit. An operator applies the patch on an ordinary
-feature branch and opens a PR; proposals never automatically push, create a PR or merge.
+The **Security tool updates** workflow runs weekly or by manual dispatch on the default branch.
+Its read-only preparation job tests the updater, verifies eligible releases and produces an allowlisted
+scanner-pin patch with an exact base commit. If a patch exists, a separate `issues: write` job publishes
+a bot-owned review issue. An existing open bot-owned proposal is left unchanged, preserving discussion;
+no eligible changes means no new issue. The proposal does not apply pins to the repository.
+
+An operator reviews and applies the patch on an ordinary feature branch and opens a PR.
 Normal `test`, `docker`, `security` checks and latest-head Copilot review still apply.
-Treat this as a design until its implementation is merged and verified; Actions PR creation/approval
-remains disabled, and no automatic approval or merge is authorized.
+The workflow never automatically pushes, creates a PR, approves or merges. Actions PR creation/approval
+remains disabled; issue proposals do not bypass review or CI.
 
 ### Repository protections
 

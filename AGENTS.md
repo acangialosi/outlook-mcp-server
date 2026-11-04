@@ -9,4 +9,5 @@
 - Preserve behavior, Graph grants and consent safeguards unless a change is explicitly requested.
 - From a fresh checkout, run `npm ci` then `npm test`; synthetic tests need no `.env`, tenant, mailbox
   or credentials. Run the security gates; report actual results and blockers, never assumed passes.
+- For scanner maintenance, also run the credential-free Python stdlib tests documented in README.
 - See [.github/copilot-instructions.md](.github/copilot-instructions.md) for implementation acceptance.
