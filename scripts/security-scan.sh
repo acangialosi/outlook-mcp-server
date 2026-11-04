@@ -19,11 +19,12 @@ secrets() {
   if [ "$(git -C "$repo" rev-parse --is-shallow-repository)" != "false" ]; then
     echo "::error::Shallow history cannot be scanned completely; check out with fetch-depth: 0."; return 1
   fi
-  # Every branch and tag, not just this commit's ancestry. Inline gitleaks:allow comments are ignored:
+  # Include each merge's diff against its parents, not only ordinary commits on every ref.
+  # Inline gitleaks:allow comments are ignored:
   # the only exceptions are the reviewed ones in .gitleaks.toml.
   local scan=("${GITLEAKS:?set GITLEAKS to the gitleaks binary}" --config "$ROOT/.gitleaks.toml" --ignore-gitleaks-allow
     --redact --verbose --no-banner --exit-code 1)
-  "${scan[0]}" git "${scan[@]:1}" --log-opts="--all" "$repo" &&
+  "${scan[0]}" git "${scan[@]:1}" --log-opts="--all --diff-merges=separate" "$repo" &&
     git -C "$repo" log --all --format=%B | "${scan[0]}" stdin "${scan[@]:1}" ||
     { echo "::error::Secret detected (redacted above). Remove it from history and rotate the real credential."; return 1; }
 }
@@ -77,6 +78,19 @@ selftest() {
   git -C "$WORK/branch" add . && git -C "$WORK/branch" "${g[@]}" commit -q -m "add config"
   git -C "$WORK/branch" checkout -q main
   must_fail "a secret on a non-default branch" "aws-access-token" secrets "$WORK/branch"
+
+  fixture_repo "$WORK/merge"
+  git -C "$WORK/merge" checkout -q -b side
+  git -C "$WORK/merge" "${g[@]}" commit -q --allow-empty -m side
+  git -C "$WORK/merge" checkout -q main
+  git -C "$WORK/merge" "${g[@]}" commit -q --allow-empty -m main
+  git -C "$WORK/merge" "${g[@]}" merge -q --no-ff --no-commit side
+  printf 'aws_key = "%s"\n' "$aws" >"$WORK/merge/config.ini"
+  git -C "$WORK/merge" add config.ini
+  git -C "$WORK/merge" "${g[@]}" commit -q -m merge
+  git -C "$WORK/merge" rm -q config.ini
+  git -C "$WORK/merge" "${g[@]}" commit -q -m cleanup
+  must_fail "a historical merge-only secret" "aws-access-token" secrets "$WORK/merge"
 
   fixture_repo "$WORK/message"  # secret only in a commit message
   git -C "$WORK/message" "${g[@]}" commit -q --allow-empty -m "rotate token" -m "new token: $pat"
