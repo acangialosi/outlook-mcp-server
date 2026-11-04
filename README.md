@@ -96,8 +96,16 @@ CI checks every branch and PR, plus weekly scans. On a Bash-capable system,
 `bash scripts/security-scan.sh selftest` plants known failures. Gitleaks scans full history, all local refs
 and commit messages, rejects shallow clones and ignores inline allow comments. CI checks out all refs.
 Semgrep runs with metrics disabled. The tool-update script verifies release checksums before changing
-pinned gitleaks versions; Dependabot maintains npm, Action and container pins. Ruleset JSON files are
-templates, not a claim that repository settings have been applied.
+pinned gitleaks versions; Dependabot maintains npm, Action and container pins.
+
+### Repository protections
+
+The active main-branch ruleset blocks deletion, force pushes and direct updates, with no bypass actors.
+Changes require a pull request, all review threads resolved and passing GitHub Actions checks named
+`test`, `docker` and `security` on an up-to-date branch. It requires zero approvals for the
+single-maintainer workflow, with extra approval for unattributed changes enabled.
+The JSON files in [`.github/rulesets`](.github/rulesets) are reproducible settings templates;
+the live repository rulesets, not these files alone, enforce protection.
 
 The lightweight hygiene gate scans the working tree, including ignored environment/key/artifact files.
 It rejects unexpected paths outside the source allowlist, deployment directories/workflows, binary/key
