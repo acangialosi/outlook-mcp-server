@@ -104,6 +104,9 @@ The active main-branch ruleset blocks deletion, force pushes and direct updates,
 Changes require a pull request, all review threads resolved and passing GitHub Actions checks named
 `test`, `docker` and `security` on an up-to-date branch. It requires zero approvals for the
 single-maintainer workflow, with extra approval for unattributed changes enabled.
+An active all-branch ruleset automatically requests Copilot code review when a pull request opens
+and when new commits are pushed, including draft pull requests. Automatic review does not replace
+the required CI checks or the requirement to resolve every review thread before merging.
 The JSON files in [`.github/rulesets`](.github/rulesets) are reproducible settings templates;
 the live repository rulesets, not these files alone, enforce protection.
 
