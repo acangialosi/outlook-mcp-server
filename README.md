@@ -3,15 +3,45 @@
 A Streamable HTTP MCP server for personal Outlook.com, Hotmail and Live accounts, using Microsoft Graph.
 Each user signs into their own account. Work/school accounts are rejected.
 
+This application source repository is public with owner approval. Future visibility changes still
+require explicit owner approval.
 Production deployment is private and separately managed. This source repository contains no deployment
 authority or production configuration.
 
-## Local setup
+## Fresh-checkout tests (no credentials)
 
 Use Node.js 24 LTS (package minimum: 22) and npm.
 
+From the repository root of a fresh checkout:
+
 ```powershell
 npm ci
+npm test
+```
+
+`npm ci` downloads the locked dependencies from the package registry; no project credentials are needed.
+`npm test` builds TypeScript and runs synthetic tests, including fake Entra/Graph end-to-end,
+runtime-contract, storage and hygiene coverage. Tests provide their own synthetic configuration and
+use mocks/in-memory storage (including a loopback HTTP test), not a live tenant or mailbox.
+Do not create `.env`, register an Entra application or sign into Azure to run them.
+CI's `test` job runs these same two commands.
+
+For scanner-maintenance changes, also use Python 3 and Git to run the stdlib regression tests:
+
+```powershell
+python -I -B -m unittest discover -s scripts -p 'test_*security_tool*.py' -v
+```
+
+These maintenance-specific tests mock release downloads and issue APIs and use local Git fixtures;
+they require no network, `.env`, tenant, mailbox or credentials. CI runs them alongside, not instead of,
+the primary `npm test` application suite.
+
+## Live local setup (credentials required)
+
+After `npm ci`, the live server needs your own Entra application and local secrets; this is separate
+from the credential-free tests above.
+
+```powershell
 Copy-Item .env.example .env
 # Fill the required settings in .env, then:
 npm run dev
@@ -84,12 +114,17 @@ Coordinate deployment-impacting changes with the deployment operator in separate
 
 ## Validation and hygiene
 
+After the fresh-checkout tests, additional checks are:
+
 ```powershell
-npm test
 node scripts/operational-hygiene.mjs .
 npm audit --audit-level=moderate
 docker build --tag outlook-remote-mcp:local .
 ```
+
+These checks do not require a live tenant or mailbox. Audit requires registry access; the container
+build requires Docker and base-image/package registry access. Security scanning also needs its
+scanner tools and Bash; CI supplies them. A live `npm run dev` session is not a test prerequisite.
 
 CI checks every branch and PR, plus weekly scans. On a Bash-capable system,
 `bash scripts/security-scan.sh deps|secrets|sast|hygiene .` runs individual gates and
@@ -97,6 +132,17 @@ CI checks every branch and PR, plus weekly scans. On a Bash-capable system,
 and commit messages, rejects shallow clones and ignores inline allow comments. CI checks out all refs.
 Semgrep runs with metrics disabled. The tool-update script verifies release checksums before changing
 pinned gitleaks versions; Dependabot maintains npm, Action and container pins.
+
+The **Security tool updates** workflow runs weekly or by manual dispatch on the default branch.
+Its read-only preparation job tests the updater, verifies eligible releases and produces an allowlisted
+scanner-pin patch with an exact base commit. If a patch exists, a separate `issues: write` job publishes
+a bot-owned review issue. An existing open bot-owned proposal is left unchanged, preserving discussion;
+no eligible changes means no new issue. The proposal does not apply pins to the repository.
+
+An operator reviews and applies the patch on an ordinary feature branch and opens a PR.
+Normal `test`, `docker`, `security` checks and latest-head Copilot review still apply.
+The workflow never automatically pushes, creates a PR, approves or merges. Actions PR creation/approval
+remains disabled; issue proposals do not bypass review or CI.
 
 ### Repository protections
 
@@ -124,4 +170,5 @@ Generated `.git`, `node_modules`, `dist` and active `.security-selftest-work` ar
 those directories. No private-value denylist is stored here. The gate cannot recognize arbitrary resource
 names, custom domains, obfuscated/encoded data, or sensitive prose, and does not inspect history.
 Full-history secret scanning and human/read-only publication review remain mandatory; passing hygiene
-alone never approves publication. Do not upload source to third-party analysis services.
+alone never approves publishing additional content or changing visibility.
+Do not upload source to third-party analysis services.
