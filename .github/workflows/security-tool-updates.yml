@@ -1,0 +1,23 @@
+name: Security tool updates
+
+# Weekly check that the pinned scanners (gitleaks, Semgrep) are on their newest stable release that is at
+# least 14 days old; Dependabot doesn't track them. The run fails (and lists the updates) when a pin is
+# behind. Run `python3 scripts/update_security_tools.py apply` in a PR, then run CI and review.
+on:
+  schedule:
+    - cron: "29 13 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false # don't leave GITHUB_TOKEN in .git/config for later steps
+      - name: Compare pins with eligible releases (archive checksums verified)
+        run: python3 -I scripts/update_security_tools.py check

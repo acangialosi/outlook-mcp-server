@@ -1,0 +1,86 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: ["**"]
+  workflow_call:
+  workflow_dispatch:
+  schedule:
+    # Weekly re-scan of main, so an advisory published against unchanged code still fails a run.
+    # GitHub notifies the user who last changed this schedule (per their Actions notification
+    # settings); failures also show on the Actions tab.
+    - cron: "17 14 * * 1"
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false # don't leave GITHUB_TOKEN in .git/config for later steps
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24.22.2 # keep in step with the Dockerfile base image
+          cache: npm
+      - run: npm ci
+      - run: npm test
+
+  docker:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false # don't leave GITHUB_TOKEN in .git/config for later steps
+      - name: Build container image
+        run: docker build --tag outlook-remote-mcp:ci .
+
+  # Application checks do not deploy or hold production authority.
+  security:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false # don't leave GITHUB_TOKEN in .git/config for later steps
+          fetch-depth: 0 # full history, so secrets committed in any past commit are caught
+
+      - name: Insecure packages (npm audit)
+        run: bash scripts/security-scan.sh deps .
+
+      - name: Operational-information hygiene and focused self-tests
+        run: |
+          bash scripts/security-scan.sh hygiene .
+          node --test test/operational-hygiene.test.mjs
+
+      - name: Install pinned gitleaks
+        env:
+          GITLEAKS_VERSION: 8.30.1
+          GITLEAKS_SHA256: 551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb
+        run: |
+          curl -sSfL -o gitleaks.tgz "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          echo "${GITLEAKS_SHA256}  gitleaks.tgz" | sha256sum --check --strict
+          mkdir .security-tools
+          tar -xzf gitleaks.tgz -C .security-tools gitleaks && rm gitleaks.tgz
+          echo "GITLEAKS=$GITHUB_WORKSPACE/.security-tools/gitleaks" >> "$GITHUB_ENV"
+
+      - name: Secrets in code, history and commit messages (gitleaks)
+        run: bash scripts/security-scan.sh secrets .
+
+      - name: Vulnerabilities in source (Semgrep)
+        run: bash scripts/security-scan.sh sast .
+
+      # Proves the gates above still work: each must fail on a planted problem (a secret on a side branch,
+      # in a commit message, behind an inline allow; a shallow clone; a vulnerable package; a root container
+      # and command injection). A gate that silently stopped finding anything would fail here.
+      - name: Self-test the security gates
+        run: bash scripts/security-scan.sh selftest
+
+      - name: Remove scanner installation
+        if: always()
+        run: rm -rf .security-tools
