@@ -123,10 +123,12 @@ and commit messages, rejects shallow clones and ignores inline allow comments. C
 Semgrep runs with metrics disabled. The tool-update script verifies release checksums before changing
 pinned gitleaks versions; Dependabot maintains npm, Action and container pins.
 
-Scanner pin maintenance is proposal-only: a trusted-main analysis may publish a deduplicated issue
+Planned scanner pin automation is proposal-only: trusted-main analysis would publish a deduplicated issue
 with a verified, allowlisted patch and exact base commit. An operator applies the patch on an ordinary
 feature branch and opens a PR; proposals never automatically push, create a PR or merge.
 Normal `test`, `docker`, `security` checks and latest-head Copilot review still apply.
+Treat this as a design until its implementation is merged and verified; Actions PR creation/approval
+remains disabled, and no automatic approval or merge is authorized.
 
 ### Repository protections
 
