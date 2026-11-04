@@ -57,7 +57,7 @@ def gitleaks_asset(version: str, name: str) -> str:
 def latest_gitleaks() -> tuple[str, str] | None:
     """Newest eligible gitleaks release and its verified linux_x64 archive SHA-256."""
     tags = subprocess.run(["git", "ls-remote", "--tags", "--refs", "https://github.com/gitleaks/gitleaks"],
-                          check=True, capture_output=True, text=True).stdout.split()
+                          check=True, capture_output=True, text=True, timeout=60).stdout.split()
     versions = sorted({t.rsplit("/", 1)[-1].lstrip("v") for t in tags if STABLE.match(t.rsplit("/", 1)[-1])},
                       key=version_key, reverse=True)
     for version in versions[:15]:
@@ -73,9 +73,12 @@ def latest_gitleaks() -> tuple[str, str] | None:
         if NOW - published < timedelta(days=MIN_AGE_DAYS):
             continue
         archive = f"gitleaks_{version}_linux_x64.tar.gz"
-        expected = next((line.split()[0] for line in sums.splitlines() if line.strip().endswith(archive)), None)
+        expected = next((parts[0] for line in sums.splitlines()
+                         if len(parts := line.split()) == 2 and parts[1] == archive), None)
         if not expected:
             continue
+        if not re.fullmatch(r"[0-9a-f]{64}", expected):
+            raise ValueError(f"gitleaks {version}: malformed archive checksum")
         with http(gitleaks_asset(version, archive)) as response:
             actual = hashlib.sha256(response.read()).hexdigest()
         if actual != expected:
@@ -89,7 +92,8 @@ def latest_semgrep() -> str | None:
         releases = json.load(response)["releases"]
     eligible = []
     for version, files in releases.items():
-        if not STABLE.match(version) or not files or all(f.get("yanked") for f in files):
+        files = [f for f in files if not f.get("yanked")]
+        if not STABLE.match(version) or not files:
             continue
         uploaded = min(datetime.fromisoformat(f["upload_time_iso_8601"].replace("Z", "+00:00")) for f in files)
         if NOW - uploaded >= timedelta(days=MIN_AGE_DAYS):
@@ -113,6 +117,7 @@ def main() -> int:
         return 2
     current = pinned()
     updates: list[str] = []
+    replacements: dict[Path, str] = {}
     gitleaks = latest_gitleaks()
     if gitleaks and version_key(gitleaks[0]) > version_key(current["gitleaks"]):
         updates.append(f"gitleaks {current['gitleaks']} -> {gitleaks[0]} (sha256 {gitleaks[1]}, verified)")
@@ -120,12 +125,21 @@ def main() -> int:
             ci = CI.read_text()
             ci = ci.replace(f"GITLEAKS_VERSION: {current['gitleaks']}", f"GITLEAKS_VERSION: {gitleaks[0]}")
             ci = ci.replace(f"GITLEAKS_SHA256: {current['gitleaks_sha256']}", f"GITLEAKS_SHA256: {gitleaks[1]}")
-            CI.write_text(ci)
+            replacements[CI] = ci
     semgrep = latest_semgrep()
     if semgrep and version_key(semgrep) > version_key(current["semgrep"]):
         updates.append(f"semgrep {current['semgrep']} -> {semgrep}")
         if mode == "apply":
-            SCAN.write_text(SCAN.read_text().replace(f"SEMGREP_VERSION={current['semgrep']}", f"SEMGREP_VERSION={semgrep}"))
+            replacements[SCAN] = SCAN.read_text().replace(f"SEMGREP_VERSION={current['semgrep']}", f"SEMGREP_VERSION={semgrep}")
+    # Resolve and verify both release sources before touching either pin file.
+    originals = {path: path.read_bytes() for path in replacements}
+    try:
+        for path, content in replacements.items():
+            path.write_text(content, encoding="utf-8", newline="\n")
+    except OSError:
+        for path, original in originals.items():
+            path.write_bytes(original)
+        raise
     print("\n".join(updates) if updates else
           f"Security tools are current (gitleaks {current['gitleaks']}, semgrep {current['semgrep']}; "
           f"releases must be {MIN_AGE_DAYS}+ days old).")
