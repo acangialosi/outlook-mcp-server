@@ -29,6 +29,8 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm test
+      - name: Scanner updater and proposal regression tests (no credentials or network)
+        run: python3 -I -B -m unittest discover -s scripts -p 'test_*.py' -v
 
   docker:
     runs-on: ubuntu-latest

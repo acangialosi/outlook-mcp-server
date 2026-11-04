@@ -1,8 +1,9 @@
 name: Security tool updates
 
-# Weekly check that the pinned scanners (gitleaks, Semgrep) are on their newest stable release that is at
-# least 14 days old; Dependabot doesn't track them. The run fails (and lists the updates) when a pin is
-# behind. Run `python3 scripts/update_security_tools.py apply` in a PR, then run CI and review.
+# Reuse the weekly schedule to prepare a verified, pin-only patch review issue.
+# No Actions PR-creation setting, extra token, automatic push/PR/approval or merge.
+# A human applies the patch to an ordinary feature PR; normal CI and exact-head
+# Copilot review remain mandatory. GITHUB_TOKEN pushes/PRs would not trigger CI.
 on:
   schedule:
     - cron: "29 13 * * 1"
@@ -11,13 +12,41 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: security-tool-proposals
+  cancel-in-progress: false
+
 jobs:
-  check:
+  prepare:
+    if: github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    outputs:
+      proposal: ${{ steps.patch.outputs.proposal }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false # don't leave GITHUB_TOKEN in .git/config for later steps
-      - name: Compare pins with eligible releases (archive checksums verified)
-        run: python3 -I scripts/update_security_tools.py check
+      - name: Test release selection and proposal safety without credentials
+        run: python3 -I -B -m unittest discover -s scripts -p 'test_*security_tool*.py' -v
+      - name: Prepare eligible verified pin-only patch
+        id: patch
+        run: python3 -I scripts/security_tool_proposal.py prepare
+
+  publish:
+    needs: prepare
+    if: needs.prepare.outputs.proposal != ''
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Publish one review issue, preserving existing discussion
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PROPOSAL: ${{ needs.prepare.outputs.proposal }}
+        run: python3 -I scripts/security_tool_proposal.py publish
