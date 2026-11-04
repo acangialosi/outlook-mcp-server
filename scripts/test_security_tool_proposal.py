@@ -50,7 +50,7 @@ class ProposalTests(unittest.TestCase):
             if body is None:
                 return issues
             requests.append(body)
-            issues.append({"number": 7, **body})
+            issues.append({"number": 7, "user": {"login": "github-actions[bot]", "type": "Bot"}, **body})
             return issues[-1]
 
         with patch.object(proposal, "gh_api", side_effect=api):
@@ -66,10 +66,19 @@ class ProposalTests(unittest.TestCase):
     def test_pagination_deduplicates_renamed_issue_and_ignores_prs(self):
         page1 = [{"title": "other", "body": "", "number": n} for n in range(100)]
         page1[0] = {"title": proposal.TITLE, "number": 1, "pull_request": {}}
-        page2 = [{"title": "renamed by maintainer", "body": proposal.MARKER, "number": 123}]
+        page2 = [{"title": "renamed by maintainer", "body": proposal.MARKER, "number": 123,
+                  "user": {"login": "github-actions[bot]", "type": "Bot"}}]
         with patch.object(proposal, "gh_api", side_effect=[page1, page2]) as api:
             self.assertEqual(proposal.publish(self.payload, "example/scanners"), 123)
             self.assertEqual(api.call_count, 2)
+
+    def test_user_created_marker_or_title_cannot_suppress_verified_proposal(self):
+        impostor = {"title": proposal.TITLE, "body": proposal.MARKER, "number": 99,
+                    "user": {"login": "someone-else", "type": "User"}}
+        with patch.object(proposal, "gh_api", side_effect=[[impostor], {"number": 7}]) as api:
+            self.assertEqual(proposal.publish(self.payload, "example/scanners"), 7)
+            self.assertEqual(api.call_count, 2)
+            self.assertIn("a" * 40, api.call_args.args[1]["body"])
 
     def test_network_failure_and_pagination_limit_fail_without_creating(self):
         with patch.object(proposal, "gh_api", side_effect=subprocess.CalledProcessError(1, ["gh"])):

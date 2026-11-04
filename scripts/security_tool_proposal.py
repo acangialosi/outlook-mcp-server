@@ -111,8 +111,10 @@ def publish(proposal: str, repository: str) -> int:
     for page in range(1, 11):
         issues = gh_api(f"repos/{repository}/issues?state=open&per_page=100&page={page}")
         for issue in issues:
-            if "pull_request" not in issue and (
-                    issue["title"] == TITLE or MARKER in (issue.get("body") or "")):
+            author = issue.get("user") or {}
+            matches = issue["title"] == TITLE or MARKER in (issue.get("body") or "")
+            if (author.get("login") == "github-actions[bot]" and author.get("type") == "Bot"
+                    and "pull_request" not in issue and matches):
                 print(f"Existing proposal #{issue['number']} awaits review; left unchanged.")
                 return issue["number"]
         if len(issues) < 100:
