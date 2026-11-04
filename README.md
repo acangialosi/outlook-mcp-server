@@ -100,11 +100,13 @@ pinned gitleaks versions; Dependabot maintains npm, Action and container pins.
 
 ### Repository protections
 
-The active main-branch ruleset blocks deletion, force pushes and direct updates, with no bypass actors.
+The [active main-branch ruleset](https://github.com/acangialosi/outlook-mcp-server/rules/26517515)
+blocks deletion, force pushes and direct updates, with no bypass actors.
 Changes require a pull request, all review threads resolved and passing GitHub Actions checks named
 `test`, `docker` and `security` on an up-to-date branch. It requires zero approvals for the
 single-maintainer workflow, with extra approval for unattributed changes enabled.
-An active all-branch ruleset automatically requests Copilot code review when a pull request opens
+The [active all-branch review ruleset](https://github.com/acangialosi/outlook-mcp-server/rules/26517516)
+automatically requests Copilot code review when a pull request opens
 and when new commits are pushed, including draft pull requests. Automatic review does not replace
 the required CI checks or the requirement to resolve every review thread before merging.
 The JSON files in [`.github/rulesets`](.github/rulesets) are reproducible settings templates;
