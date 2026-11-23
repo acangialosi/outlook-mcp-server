@@ -72,6 +72,12 @@ function withoutEtag(item: unknown): unknown {
 }
 
 /** Minimal Microsoft Graph client for one user's delegated token. */
+async function graphError(response: Response): Promise<GraphError> {
+  const body = await response.json().catch(() => undefined) as { error?: { code?: unknown } } | undefined;
+  const code = typeof body?.error?.code === "string" ? body.error.code.slice(0, 100) : "UnknownError";
+  return new GraphError(response.status, code, response.headers.get("request-id"));
+}
+
 export class GraphClient {
   constructor(
     private readonly accessToken: () => Promise<string>,
@@ -82,6 +88,37 @@ export class GraphClient {
     const url = new URL(GRAPH_BASE + path);
     for (const [key, value] of Object.entries(query)) url.searchParams.set(key, value);
     return this.request(url);
+  }
+
+  /**
+   * GETs a non-JSON body as text (e.g. a OneNote page's HTML at /me/onenote/pages/{id}/content).
+   * Reads at most `maxBytes`; a larger body is refused rather than buffered without bound.
+   */
+  async getText(path: string, accept: string, maxBytes = 5_000_000): Promise<string> {
+    const response = await this.fetchRequest(new URL(GRAPH_BASE + path), {
+      method: "GET",
+      headers: { Authorization: `Bearer ${await this.accessToken()}`, Accept: accept },
+      redirect: "error",
+      signal: AbortSignal.timeout(30_000),
+    });
+    if (!response.ok) throw await graphError(response);
+    const declared = Number(response.headers.get("content-length"));
+    if (Number.isFinite(declared) && declared > maxBytes) throw new GraphError(413, "ContentTooLarge", response.headers.get("request-id"));
+    const reader = response.body?.getReader();
+    if (!reader) return "";
+    const chunks: Uint8Array[] = [];
+    let size = 0;
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      size += value.byteLength;
+      if (size > maxBytes) {
+        await reader.cancel();
+        throw new GraphError(413, "ContentTooLarge", response.headers.get("request-id"));
+      }
+      chunks.push(value);
+    }
+    return new TextDecoder().decode(Buffer.concat(chunks));
   }
 
   /** POSTs a JSON action (e.g. /me/messages/{id}/move). `beta` targets the /beta endpoint. */
@@ -178,11 +215,7 @@ export class GraphClient {
       redirect: "error",
       signal: AbortSignal.timeout(timeoutMs),
     });
-    if (!response.ok) {
-      const body = await response.json().catch(() => undefined) as { error?: { code?: unknown } } | undefined;
-      const code = typeof body?.error?.code === "string" ? body.error.code.slice(0, 100) : "UnknownError";
-      throw new GraphError(response.status, code, response.headers.get("request-id"));
-    }
+    if (!response.ok) throw await graphError(response);
     const text = await response.text();
     return text ? JSON.parse(text) as Record<string, unknown> : {};
   }

@@ -327,7 +327,7 @@ export class OAuthServer implements OAuthTokenVerifier {
     return htmlPage("Connect Outlook.com", `
 <h1>Connect your Outlook.com account</h1>
 <p><strong>${escapeHtml(name)}</strong> wants access to your personal Outlook.com:</p>
-<ul><li>Profile</li><li>Mail: read, search, move between folders, mark read or unread, flag, categorize, and report as not junk</li><li>Mail folders: create</li><li>Calendar events (read)</li><li>Contacts (read)</li></ul>
+<ul><li>Profile</li><li>Mail: read, search, move between folders, mark read or unread, flag, categorize, and report as not junk</li><li>Mail folders: create</li><li>Calendar events (read)</li><li>Contacts (read)</li><li>OneNote notebooks and pages (read)</li></ul>
 <p class="muted">It cannot send or permanently delete mail, rename or delete folders, or change calendar events or contacts. Moving mail to Deleted Items is reversible.</p>
 <p class="muted">After approval you will return to <code>${escapeHtml(host)}</code>. Only continue if you started this connection from that app.</p>
 <form method="post" action="/authorize/consent">
