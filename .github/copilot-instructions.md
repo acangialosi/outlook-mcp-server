@@ -3,7 +3,7 @@
 Follow [AGENTS.md](../AGENTS.md). Work on a feature branch, keep each change focused, and describe
 acceptance criteria, validation and deployment impact in the pull request. Never change visibility
 without explicit owner approval. Do not commit or push when an approval gate or stopping point applies.
-This application repository is already public with owner approval, not a private publication candidate.
+This application repository is public with owner approval.
 
 ## Application and security acceptance
 

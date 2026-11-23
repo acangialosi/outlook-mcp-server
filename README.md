@@ -167,7 +167,7 @@ It rejects unexpected paths outside the source allowlist, deployment directories
 artifacts, Azure resource-ID paths, common Azure service endpoint suffixes, UUIDs other than reviewed
 public Microsoft constants and exact test-only synthetic IDs, and email outside reserved example/test
 domains. It reports categories/paths, not detected values. Fixtures use reserved domains; examples use
-unfilled placeholders. Local `.env` must be removed from the tree before running this publication gate.
+unfilled placeholders. Local `.env` must be removed from the tree before running this hygiene gate.
 The scanner's own exact synthetic-ID table is permitted only to define those test exceptions.
 
 Generated `.git`, `node_modules`, `dist` and active `.security-selftest-work` are excluded; never export
