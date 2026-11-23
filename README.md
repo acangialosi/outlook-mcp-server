@@ -81,7 +81,7 @@ real client IP as the last `X-Forwarded-For` address. Do not expose that backend
 | `list_events` | Calendar date range with recurring instances expanded |
 | `list_contacts` | Saved contacts |
 | `list_notebooks` | OneNote notebooks, most recently modified first |
-| `list_onenote_sections` | OneNote sections (all, or one notebook's) with their notebook and section group |
+| `list_onenote_sections` | OneNote sections (all, or one notebook's, including those in section groups) with their notebook and section group |
 | `list_onenote_pages` | OneNote page titles and dates, in one section or across all notebooks |
 | `get_onenote_page` | One OneNote page as plain text (lists, to-dos, links kept; images and attachments as placeholders), capped at `maxChars` |
 | `move_message` | Move one message, including reversible soft delete to Deleted Items, and return its new ID |

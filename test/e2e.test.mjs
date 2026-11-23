@@ -31,11 +31,11 @@ const FOLDERS = [
 const ONENOTE_PAGE_HTML = `<!DOCTYPE html><html><head><title>Trip plan</title><style>p{color:red}</style>
 <script>alert("x")</script></head><body data-absolute-enabled="true">
 <div><h1>Packing &amp; prep</h1><p data-tag="to-do">Book &quot;hotel&quot;</p><p data-tag="to-do:completed">Renew passport</p>
-<ul><li>Socks</li><li>Charger &#8212; USB-C</li></ul>
-<p>Itinerary: <a href="https://example.com/itinerary">the plan</a> and <a href="javascript:alert(1)">bad</a></p>
+<ul><li>Socks</li><li>Charger &#8212; USB-C</li><li data-tag="to-do:completed">Print boarding pass</li><li data-tag="to-do">Pack snacks</li></ul>
+<p>Itinerary: <a href="https://example.com/itinerary" title="a > b">the plan</a> and <a href="javascript:alert(1)">bad</a></p>
 <img alt="Map of route" src="https://graph.microsoft.com/v1.0/users('u')/onenote/resources/r1/$value" />
 <object data-attachment="tickets.pdf" data="https://graph.microsoft.com/v1.0/users('u')/onenote/resources/r2/$value" type="application/pdf"></object>
-<table><tr><td>Day 1</td><td>Seattle</td></tr><tr><td>Day 2</td><td>Portland</td></tr></table>
+<table><tr><td><p>Day 1</p></td><td><p>Seattle</p><p>downtown</p></td></tr><tr><td><p>Day 2</p></td><td></td><td>Portland</td></tr><tr><td></td><td>late</td><td></td></tr></table>
 <!-- ignore me --></div></body></html>`;
 
 /** Fake Entra token endpoint plus fake Graph, standing in for the network. */
@@ -115,7 +115,10 @@ function fakeMicrosoft({ tid = MSA_TID, username = "user@example.com" } = {}) {
         }
         const skip = Number(url.searchParams.get("$skip") ?? 0);
         const top = Number(url.searchParams.get("$top") ?? 20);
-        const all = Array.from({ length: 3 }, (_, i) => ({ id: `${sub ?? kind}-${i}`, displayName: `Item ${i}`, title: `Item ${i}` }));
+        const all = Array.from({ length: 3 }, (_, i) => ({ id: `${sub ?? kind}-${i}`, displayName: `Item ${i}`, title: `Item ${i}`,
+          // Sections belong to notebooks; sections-2 sits inside a section group of nb-A.
+          ...(kind === "sections" && !key ? { parentNotebook: { id: i === 1 ? "nb-B" : "nb-A" },
+            parentSectionGroup: i === 2 ? { id: "sg1", displayName: "Archive" } : null } : {}) }));
         const items = all.slice(skip, skip + top);
         return Response.json({ value: items, ...(skip + top < all.length ? {
           "@odata.nextLink": `https://graph.microsoft.com/v1.0/users('user-oid')/onenote/${sub ?? kind}?$top=${top}&$skip=${skip + top}` } : {}) });
@@ -627,9 +630,14 @@ describe("mailbox tools", () => {
     assert.equal(rest.nextSkip, undefined, "no more pages");
     assert.equal(lastQuery(ms).get("$skip"), "2");
 
-    await mcp.callTool({ name: "list_onenote_sections", arguments: { notebookId: "0-AB!12" } });
-    assert.equal(new URL(ms.calls.graph.at(-1).url).pathname, "/v1.0/me/onenote/notebooks/0-AB!12/sections");
+    // A notebook's sections include those inside section groups (Graph's /notebooks/{id}/sections omits them).
+    const nbA = result(await mcp.callTool({ name: "list_onenote_sections", arguments: { notebookId: "nb-A" } }));
+    assert.deepEqual(nbA.items.map((x) => x.id), ["sections-0", "sections-2"]);
+    assert.equal(nbA.items[1].parentSectionGroup.displayName, "Archive");
+    assert.equal(new URL(ms.calls.graph.at(-1).url).pathname, "/v1.0/me/onenote/sections");
     assert.match(lastQuery(ms).get("$expand"), /parentNotebook.*parentSectionGroup/);
+    const nbAPage = result(await mcp.callTool({ name: "list_onenote_sections", arguments: { notebookId: "nb-A", top: 1 } }));
+    assert.deepEqual([nbAPage.items.map((x) => x.id), nbAPage.nextSkip], [["sections-0"], 1]);
     await mcp.callTool({ name: "list_onenote_sections", arguments: {} });
     assert.equal(new URL(ms.calls.graph.at(-1).url).pathname, "/v1.0/me/onenote/sections", "all sections, groups included");
 
@@ -651,11 +659,16 @@ describe("mailbox tools", () => {
     const content = ms.calls.graph.at(-1);
     assert.equal(new URL(content.url).pathname, "/v1.0/me/onenote/pages/1-xyz!5/content");
     for (const line of ["Packing & prep", "[ ] Book \"hotel\"", "[x] Renew passport", "- Socks", "- Charger — USB-C",
-      "Itinerary: the plan (https://example.com/itinerary) and bad", "[image: Map of route]", "[attachment: tickets.pdf]",
-      "Day 1\tSeattle", "Day 2\tPortland"]) {
+      "- [x] Print boarding pass", "- [ ] Pack snacks",
+      "Itinerary: the plan (https://example.com/itinerary) and bad", "[image: Map of route]", "[attachment: tickets.pdf]"]) {
       assert.ok(page.text.includes(line), `missing ${JSON.stringify(line)} in:\n${page.text}`);
     }
-    for (const gone of ["alert", "color:red", "ignore me", "javascript:", "<", "resources/r1"]) {
+    // One line per table row, cells tab-separated, paragraph-wrapped and empty cells preserved.
+    const lines = page.text.split("\n");
+    assert.ok(lines.includes("Day 1\tSeattle downtown"), page.text);
+    assert.ok(lines.includes("Day 2\t\tPortland"), "empty middle cell kept");
+    assert.ok(lines.includes("\tlate\t"), "empty first and last cells kept");
+    for (const gone of ["alert", "color:red", "ignore me", "javascript:", "<", "resources/r1", "title=", "a > b"]) {
       assert.ok(!page.text.includes(gone), `${gone} should not appear`);
     }
     const cut = result(await mcp.callTool({ name: "get_onenote_page", arguments: { id: "1-xyz!5", maxChars: 1000 } }));

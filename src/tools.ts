@@ -424,6 +424,7 @@ export function createOutlookServer(graph: GraphClient): McpServer {
 
   // OneNote (read-only). Lists page with $top/$skip and return `nextSkip`, never a Graph nextLink: callers pass back
   // only a number, so a crafted link can't steer the request, and the collection path is always rebuilt here.
+  const MAX_SECTION_SCAN = 2000;
   const onenoteTop = z.number().int().min(1).max(100).default(20).describe("Page size (1-100).");
   const skip = z.number().int().min(0).max(100_000).default(0).describe("Items to skip: pass nextSkip from the previous call.");
   const onenoteList = (path: string, query: Record<string, string>, top: number, skip: number) => async () => {
@@ -443,22 +444,39 @@ export function createOutlookServer(graph: GraphClient): McpServer {
 
   server.registerTool("list_onenote_sections", {
     title: "List OneNote sections",
-    description: "List OneNote sections with their notebook and section group. Without notebookId, lists every " +
-      "section in every notebook (including those inside section groups); with it, only that notebook's top-level " +
-      "sections.",
+    description: "List OneNote sections, most recently modified first, each with its notebook and section group " +
+      "(if any). Includes sections inside section groups. With notebookId, only that notebook's sections.",
     inputSchema: z.object({
       notebookId: graphId.optional().describe("Notebook ID from list_notebooks."),
       top: onenoteTop,
       skip,
     }),
     annotations: readOnly,
-  }, ({ notebookId, top, skip }) => run(onenoteList(
-    notebookId ? `/me/onenote/notebooks/${encodeURIComponent(notebookId)}/sections` : "/me/onenote/sections",
-    {
+  }, ({ notebookId, top, skip }) => run(async () => {
+    const query = {
       $select: "id,displayName,createdDateTime,lastModifiedDateTime,isDefault",
       $expand: "parentNotebook($select=id,displayName),parentSectionGroup($select=id,displayName)",
       $orderby: "lastModifiedDateTime desc",
-    }, top, skip)));
+    };
+    if (!notebookId) return onenoteList("/me/onenote/sections", query, top, skip)();
+    // /notebooks/{id}/sections returns only top-level sections, so filter the full list (which includes
+    // sections in section groups at any depth) by parent notebook. Bounded: at most MAX_SECTION_SCAN sections.
+    const matches: unknown[] = [];
+    let scanned = 0;
+    for (let offset = 0; ; offset += 100) {
+      const page = await graph.page("/me/onenote/sections", { ...query, $top: "100", ...(offset ? { $skip: String(offset) } : {}) });
+      scanned += page.items.length;
+      for (const item of page.items as { parentNotebook?: { id?: unknown } }[]) {
+        if (item.parentNotebook?.id === notebookId) matches.push(item);
+      }
+      if (!page.nextLink || page.items.length === 0) break;
+      if (scanned >= MAX_SECTION_SCAN) {
+        throw new InputError(`This account has more than ${MAX_SECTION_SCAN} OneNote sections; list them without notebookId and page with skip.`);
+      }
+    }
+    const items = matches.slice(skip, skip + top);
+    return { items, ...(skip + top < matches.length ? { nextSkip: skip + top } : {}) };
+  }));
 
   server.registerTool("list_onenote_pages", {
     title: "List OneNote pages",

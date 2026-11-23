@@ -39,28 +39,48 @@ export interface PageText {
   totalChars: number;
 }
 
+function todoMarker(tag: string): string {
+  const dataTag = attribute(tag, "data-tag") ?? "";
+  if (/\bto-do:completed\b/.test(dataTag)) return "[x] ";
+  if (/\bto-do\b/.test(dataTag)) return "[ ] ";
+  return "";
+}
+
 export function onenoteHtmlToText(html: string, maxChars: number): PageText {
   const out: string[] = [];
   const links: string[] = [];
-  // Drop non-content elements wholesale (with their contents) and comments.
+  // One entry per open table: whether the current row already has a cell, and whether we're inside a cell.
+  const tables: { cells: number; inCell: number }[] = [];
+  const inCell = () => (tables.at(-1)?.inCell ?? 0) > 0;
+  // Drop non-content elements wholesale (with their contents), comments and declarations; keep the <title>.
   const source = html
     .replace(/<!--[\s\S]*?-->/g, "")
-    .replace(/<![^>]*>|<\?[^>]*\?>/g, "") // <!DOCTYPE …>, <![CDATA[…]]>-style and <?xml …?> declarations
-    .replace(/<(script|style|head|noscript|template)\b[\s\S]*?<\/\1\s*>/gi, (m, tag: string) => tag.toLowerCase() === "head" ? (/<title\b[^>]*>([\s\S]*?)<\/title>/i.exec(m)?.[0] ?? "") : "");
+    .replace(/<![^>]*>|<\?[^>]*\?>/g, "") // <!DOCTYPE …> and <?xml …?> declarations
+    .replace(/<(script|style|head|noscript|template)\b[\s\S]*?<\/\1\s*>/gi, (m, tag: string) =>
+      tag.toLowerCase() === "head" ? (/<title\b[^>]*>([\s\S]*?)<\/title>/i.exec(m)?.[0] ?? "") : "");
 
-  const pattern = /<\/?([a-zA-Z][a-zA-Z0-9]*)\b[^>]*>|([^<]+)|(<)/g;
+  // A tag ends at the first ">" outside quoted attribute values.
+  const pattern = /<\/?([a-zA-Z][a-zA-Z0-9]*)\b(?:[^>"']|"[^"]*"|'[^']*')*>|([^<]+)|(<)/g;
   for (const match of source.matchAll(pattern)) {
     const [whole, rawTag, text] = match;
-    if (text !== undefined || match[3]) { out.push(decode(text ?? "<").replace(/\s+/g, " ")); continue; }
+    if (text !== undefined || match[3]) { out.push(decode(text ?? "<").replace(/[\s]+/g, " ")); continue; }
     const tag = rawTag!.toLowerCase();
     const closing = whole.startsWith("</");
-    if (!closing && tag === "li") { out.push("\n- "); continue; }
-    if (!closing && (tag === "td" || tag === "th")) { out.push("\t"); continue; }
-    if (!closing && (tag === "p" || tag === "div" || /^h[1-6]$/.test(tag))) {
-      const dataTag = attribute(whole, "data-tag") ?? "";
+    if (tag === "table") {
+      if (closing) tables.pop(); else tables.push({ cells: 0, inCell: 0 });
       out.push("\n");
-      if (/\bto-do:completed\b/.test(dataTag)) out.push("[x] ");
-      else if (/\bto-do\b/.test(dataTag)) out.push("[ ] ");
+      continue;
+    }
+    const table = tables.at(-1);
+    if (table && tag === "tr") { if (!closing) table.cells = 0; out.push("\n"); continue; }
+    if (table && (tag === "td" || tag === "th")) {
+      if (closing) table.inCell = Math.max(0, table.inCell - 1);
+      else { if (table.cells++ > 0) out.push("\t"); table.inCell++; }
+      continue;
+    }
+    if (!closing && tag === "li") { out.push("\n- ", todoMarker(whole)); continue; }
+    if (!closing && (tag === "p" || tag === "div" || /^h[1-6]$/.test(tag))) {
+      out.push(inCell() ? " " : "\n", todoMarker(whole));
       continue;
     }
     if (!closing && tag === "img") {
@@ -81,12 +101,16 @@ export function onenoteHtmlToText(html: string, maxChars: number): PageText {
       }
       continue;
     }
-    if (BLOCK.has(tag)) out.push("\n");
+    // Inside a table cell, block boundaries are word breaks, so a row stays on one line.
+    if (BLOCK.has(tag)) out.push(inCell() ? " " : "\n");
   }
 
   const full = out.join("")
-    .split("\n").map((line) => line.replace(/[ \t]*\t[ \t]*/g, "\t").replace(/ {2,}/g, " ").trim()).join("\n")
-    .replace(/\n{2,}/g, "\n").trim(); // one line per block; blank lines only waste tokens
+    .split("\n")
+    // Tabs separate table cells, so keep every one (empty cells included); tidy only spaces.
+    .map((line) => line.replace(/ *\t */g, "\t").replace(/ {2,}/g, " ").replace(/^ +| +$/g, ""))
+    .filter((line) => line.replace(/\t/g, "") !== "" || line.includes("\t"))
+    .join("\n"); // no outer trim: a leading/trailing tab is an empty first/last table cell
   // Cut on a code point boundary so a surrogate pair is never split.
   const chars = Array.from(full);
   return chars.length > maxChars
