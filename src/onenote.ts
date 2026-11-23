@@ -111,9 +111,17 @@ export function onenoteHtmlToText(html: string, maxChars: number): PageText {
     .map((line) => line.replace(/ *\t */g, "\t").replace(/ {2,}/g, " ").replace(/^ +| +$/g, ""))
     .filter((line) => line.replace(/\t/g, "") !== "" || line.includes("\t"))
     .join("\n"); // no outer trim: a leading/trailing tab is an empty first/last table cell
-  // Cut on a code point boundary so a surrogate pair is never split.
-  const chars = Array.from(full);
-  return chars.length > maxChars
-    ? { text: chars.slice(0, maxChars).join(""), truncated: true, totalChars: chars.length }
-    : { text: full, truncated: false, totalChars: chars.length };
+  // Count code points and cut on a code point boundary (never splitting a surrogate pair), without
+  // materializing the whole text as an array.
+  let totalChars = 0;
+  let cutAt = full.length; // UTF-16 index where code point number maxChars starts
+  let index = 0;
+  for (const char of full) {
+    if (totalChars === maxChars) cutAt = index;
+    totalChars++;
+    index += char.length;
+  }
+  return totalChars > maxChars
+    ? { text: full.slice(0, cutAt), truncated: true, totalChars }
+    : { text: full, truncated: false, totalChars };
 }

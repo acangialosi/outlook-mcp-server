@@ -119,9 +119,11 @@ function fakeMicrosoft({ tid = MSA_TID, username = "user@example.com" } = {}) {
           // Sections belong to notebooks; sections-2 sits inside a section group of nb-A.
           ...(kind === "sections" && !key ? { parentNotebook: { id: i === 1 ? "nb-B" : "nb-A" },
             parentSectionGroup: i === 2 ? { id: "sg1", displayName: "Archive" } : null } : {}) }));
-        const items = all.slice(skip, skip + top);
-        return Response.json({ value: items, ...(skip + top < all.length ? {
-          "@odata.nextLink": `https://graph.microsoft.com/v1.0/users('user-oid')/onenote/${sub ?? kind}?$top=${top}&$skip=${skip + top}` } : {}) });
+        // Graph may return fewer items than $top while still giving a nextLink; the all-sections list does here.
+        const size = kind === "sections" && !key ? Math.min(top, 2) : top;
+        const items = all.slice(skip, skip + size);
+        return Response.json({ value: items, ...(skip + size < all.length ? {
+          "@odata.nextLink": `https://graph.microsoft.com/v1.0/users('user-oid')/onenote/${sub ?? kind}?$top=${top}&$skip=${skip + size}` } : {}) });
       }
       const message = /^\/v1\.0\/me\/messages\/([^/]+)$/.exec(url.pathname);
       if (message && ["GET", "PATCH"].includes(init.method ?? "GET")) {
@@ -226,6 +228,7 @@ async function authorize(app, { register = {}, approve = true } = {}) {
   assert.match(html, /Test Agent/);
   assert.match(html, /move between folders, mark read or unread, flag, categorize/, "consent lists every mail write");
   assert.match(html, /OneNote notebooks and pages \(read\)/, "consent discloses OneNote read access");
+  assert.match(html, /change calendar events, contacts, or OneNote\./, "consent says OneNote can't be changed");
   assert.match(html, /Mail folders: create/);
   assert.match(html, /cannot send or permanently delete mail/, "consent excludes permanent deletion, not soft deletion");
   assert.match(html, /Moving mail to Deleted Items is reversible\./, "consent discloses reversible soft deletion");
@@ -632,7 +635,7 @@ describe("mailbox tools", () => {
 
     // A notebook's sections include those inside section groups (Graph's /notebooks/{id}/sections omits them).
     const nbA = result(await mcp.callTool({ name: "list_onenote_sections", arguments: { notebookId: "nb-A" } }));
-    assert.deepEqual(nbA.items.map((x) => x.id), ["sections-0", "sections-2"]);
+    assert.deepEqual(nbA.items.map((x) => x.id), ["sections-0", "sections-2"]);  // sections-2 is on Graph's second, short page
     assert.equal(nbA.items[1].parentSectionGroup.displayName, "Archive");
     assert.equal(new URL(ms.calls.graph.at(-1).url).pathname, "/v1.0/me/onenote/sections");
     assert.match(lastQuery(ms).get("$expand"), /parentNotebook.*parentSectionGroup/);

@@ -463,8 +463,9 @@ export function createOutlookServer(graph: GraphClient): McpServer {
     // sections in section groups at any depth) by parent notebook. Bounded: at most MAX_SECTION_SCAN sections.
     const matches: unknown[] = [];
     let scanned = 0;
-    for (let offset = 0; ; offset += 100) {
-      const page = await graph.page("/me/onenote/sections", { ...query, $top: "100", ...(offset ? { $skip: String(offset) } : {}) });
+    for (;;) {
+      // Advance by what Graph actually returned, so a short page with a nextLink skips nothing.
+      const page = await graph.page("/me/onenote/sections", { ...query, $top: "100", ...(scanned ? { $skip: String(scanned) } : {}) });
       scanned += page.items.length;
       for (const item of page.items as { parentNotebook?: { id?: unknown } }[]) {
         if (item.parentNotebook?.id === notebookId) matches.push(item);
