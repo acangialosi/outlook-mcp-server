@@ -14,8 +14,9 @@
       "https://graph.microsoft.com/User.Read",
       "https://graph.microsoft.com/Mail.ReadWrite",
       "https://graph.microsoft.com/Calendars.Read",
-      "https://graph.microsoft.com/Contacts.Read"
+      "https://graph.microsoft.com/Contacts.Read",
+      "https://graph.microsoft.com/Notes.Read"
     ],
-    "grantVersion": 2
+    "grantVersion": 3
   }
 }

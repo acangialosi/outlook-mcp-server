@@ -80,6 +80,10 @@ real client IP as the last `X-Forwarded-For` address. Do not expose that backend
 | `list_mail_folders` | Folder tree with paths and total/unread counts |
 | `list_events` | Calendar date range with recurring instances expanded |
 | `list_contacts` | Saved contacts |
+| `list_notebooks` | OneNote notebooks, most recently modified first |
+| `list_onenote_sections` | OneNote sections (all, or one notebook's, including those in section groups) with their notebook and section group |
+| `list_onenote_pages` | OneNote page titles and dates, in one section or across all notebooks |
+| `get_onenote_page` | One OneNote page as plain text (lists, to-dos, links kept; images and attachments as placeholders), capped at `maxChars` |
 | `move_message` | Move one message, including reversible soft delete to Deleted Items, and return its new ID |
 | `move_messages` | Move up to 100, including reversible soft delete to Deleted Items, with per-message results and undo identifiers |
 | `update_messages` | Mark up to 100 read/unread, flag/unflag, set categories |
@@ -101,10 +105,10 @@ resource binding, issuer identification and rotating refresh tokens. A consent p
 and redirect host before Microsoft sign-in through the personal-account authority.
 Microsoft refresh tokens stay server-side encrypted with AES-256-GCM; MCP tokens and codes are hashed.
 
-Graph delegated scopes are `User.Read`, `Mail.ReadWrite`, `Calendars.Read`, `Contacts.Read`.
+Graph delegated scopes are `User.Read`, `Mail.ReadWrite`, `Calendars.Read`, `Contacts.Read`, `Notes.Read` (read-only OneNote, added in grant version 3, so existing users reconnect once).
 Upstream sign-in additionally requests `openid`, `profile`, `email`, `offline_access`; these are not
-Graph permission entries in the contract. Grant version remains 2; no permission/grant changes are
-introduced by repository separation. A scope change requires re-consent and a grant-version bump.
+Graph permission entries in the contract. Grant version is 3 (bumped from 2 when `Notes.Read` was
+added). A scope change requires re-consent and a grant-version bump.
 
 [`runtime-contract.json`](runtime-contract.json) schema version 1 declares container port 8080,
 health route `/healthz`, MCP route `/mcp`, genuinely required/optional environment keys and exact Graph

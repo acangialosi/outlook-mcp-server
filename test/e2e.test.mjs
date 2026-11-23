@@ -28,6 +28,16 @@ const FOLDERS = [
   { id: fid("projtravel"), displayName: "Travel", parentFolderId: fid("projects") },
 ];
 
+const ONENOTE_PAGE_HTML = `<!DOCTYPE html><html><head><title>Trip plan</title><style>p{color:red}</style>
+<script>alert("x")</script></head><body data-absolute-enabled="true">
+<div><h1>Packing &amp; prep</h1><p data-tag="to-do">Book &quot;hotel&quot;</p><p data-tag="to-do:completed">Renew passport</p>
+<ul><li>Socks</li><li>Charger &#8212; USB-C</li><li data-tag="to-do:completed">Print boarding pass</li><li data-tag="to-do">Pack snacks</li></ul>
+<p>Itinerary: <a href="https://example.com/itinerary" title="a > b">the plan</a> and <a href="javascript:alert(1)">bad</a></p>
+<img alt="Map of route" src="https://graph.microsoft.com/v1.0/users('u')/onenote/resources/r1/$value" />
+<object data-attachment="tickets.pdf" data="https://graph.microsoft.com/v1.0/users('u')/onenote/resources/r2/$value" type="application/pdf"></object>
+<table><tr><td><p>Day 1</p></td><td><p>Seattle</p><p>downtown</p></td></tr><tr><td><p>Day 2</p></td><td></td><td>Portland</td></tr><tr><td></td><td>late</td><td></td></tr></table>
+<!-- ignore me --></div></body></html>`;
+
 /** Fake Entra token endpoint plus fake Graph, standing in for the network. */
 function fakeMicrosoft({ tid = MSA_TID, username = "user@example.com" } = {}) {
   const calls = { token: [], graph: [] };
@@ -88,6 +98,33 @@ function fakeMicrosoft({ tid = MSA_TID, username = "user@example.com" } = {}) {
         }
       }
       if (url.pathname === "/v1.0/me") return Response.json({ displayName: "Test User", mail: username });
+      // OneNote. Real nextLinks use the users('<id>')/onenote/... form, which the tools never follow.
+      const onenote = /^\/v1\.0\/me\/onenote\/(notebooks|sections|pages)(?:\/([^/]+)(?:\/(sections|pages|content))?)?$/.exec(url.pathname);
+      if (onenote && (init.method ?? "GET") === "GET") {
+        const [, kind, id, sub] = onenote;
+        const key = id && decodeURIComponent(id);
+        if (key === "missing") return Response.json({ error: { code: "20102" } }, { status: 404 });
+        if (sub === "content") {
+          if (key === "huge") return new Response("<p>" + "x".repeat(5_000_010) + "</p>", { headers: { "Content-Type": "text/html" } });
+          return new Response(ONENOTE_PAGE_HTML, { headers: { "Content-Type": "text/html" } });
+        }
+        if (kind === "pages" && key) {
+          return Response.json({ id: key, title: "Trip plan", createdDateTime: "2026-05-01T10:00:00Z",
+            lastModifiedDateTime: "2026-05-02T10:00:00Z", parentSection: { id: "s1", displayName: "Travel" },
+            parentNotebook: { id: "nb1", displayName: "Personal" } });
+        }
+        const skip = Number(url.searchParams.get("$skip") ?? 0);
+        const top = Number(url.searchParams.get("$top") ?? 20);
+        const all = Array.from({ length: 3 }, (_, i) => ({ id: `${sub ?? kind}-${i}`, displayName: `Item ${i}`, title: `Item ${i}`,
+          // Sections belong to notebooks; sections-2 sits inside a section group of nb-A.
+          ...(kind === "sections" && !key ? { parentNotebook: { id: i === 1 ? "nb-B" : "nb-A" },
+            parentSectionGroup: i === 2 ? { id: "sg1", displayName: "Archive" } : null } : {}) }));
+        // Graph may return fewer items than $top while still giving a nextLink; the all-sections list does here.
+        const size = kind === "sections" && !key ? Math.min(top, 2) : top;
+        const items = all.slice(skip, skip + size);
+        return Response.json({ value: items, ...(skip + size < all.length ? {
+          "@odata.nextLink": `https://graph.microsoft.com/v1.0/users('user-oid')/onenote/${sub ?? kind}?$top=${top}&$skip=${skip + size}` } : {}) });
+      }
       const message = /^\/v1\.0\/me\/messages\/([^/]+)$/.exec(url.pathname);
       if (message && ["GET", "PATCH"].includes(init.method ?? "GET")) {
         const id = decodeURIComponent(message[1]);
@@ -190,6 +227,8 @@ async function authorize(app, { register = {}, approve = true } = {}) {
   const html = await consentPage.text();
   assert.match(html, /Test Agent/);
   assert.match(html, /move between folders, mark read or unread, flag, categorize/, "consent lists every mail write");
+  assert.match(html, /OneNote notebooks and pages \(read\)/, "consent discloses OneNote read access");
+  assert.match(html, /change calendar events, contacts, or OneNote\./, "consent says OneNote can't be changed");
   assert.match(html, /Mail folders: create/);
   assert.match(html, /cannot send or permanently delete mail/, "consent excludes permanent deletion, not soft deletion");
   assert.match(html, /Moving mail to Deleted Items is reversible\./, "consent discloses reversible soft deletion");
@@ -270,7 +309,11 @@ describe("end-to-end", () => {
     const { tools } = await mcp.listTools();
     assert.deepEqual(tools.map((t) => t.name).sort(),
       ["get_message", "get_profile", "list_contacts", "list_events", "list_mail_folders", "list_messages", "mark_not_junk",
-        "move_message", "move_messages", "search_messages", "update_messages", "create_mail_folder", "summarize_senders"].sort());
+        "move_message", "move_messages", "search_messages", "update_messages", "create_mail_folder", "summarize_senders",
+        "list_notebooks", "list_onenote_sections", "list_onenote_pages", "get_onenote_page"].sort());
+    for (const name of ["list_notebooks", "list_onenote_sections", "list_onenote_pages", "get_onenote_page"]) {
+      assert.equal(tools.find((t) => t.name === name).annotations.readOnlyHint, true, `${name} is read-only`);
+    }
     for (const name of ["move_message", "move_messages", "update_messages", "mark_not_junk", "create_mail_folder"]) {
       const tool = tools.find((t) => t.name === name);
       assert.equal(tool.annotations.readOnlyHint, false, `${name} is not read-only`);
@@ -577,6 +620,83 @@ describe("mailbox tools", () => {
   }
   const result = (r) => JSON.parse(r.content[0].text);
   const lastQuery = (ms) => new URL(ms.calls.graph.at(-1).url).searchParams;
+
+  it("lists OneNote notebooks, sections and pages with $top/$skip, returning nextSkip instead of Graph's link", async () => {
+    const { mcp, ms } = await connected();
+    const first = result(await mcp.callTool({ name: "list_notebooks", arguments: { top: 2 } }));
+    assert.deepEqual(first.items.map((x) => x.id), ["notebooks-0", "notebooks-1"]);
+    assert.equal(first.nextSkip, 2);
+    assert.equal(first.nextLink, undefined, "Graph's nextLink is never handed to the caller");
+    assert.equal(lastQuery(ms).get("$orderby"), "lastModifiedDateTime desc");
+    const rest = result(await mcp.callTool({ name: "list_notebooks", arguments: { top: 2, skip: first.nextSkip } }));
+    assert.deepEqual(rest.items.map((x) => x.id), ["notebooks-2"]);
+    assert.equal(rest.nextSkip, undefined, "no more pages");
+    assert.equal(lastQuery(ms).get("$skip"), "2");
+
+    // A notebook's sections include those inside section groups (Graph's /notebooks/{id}/sections omits them).
+    const nbA = result(await mcp.callTool({ name: "list_onenote_sections", arguments: { notebookId: "nb-A" } }));
+    assert.deepEqual(nbA.items.map((x) => x.id), ["sections-0", "sections-2"]);  // sections-2 is on Graph's second, short page
+    assert.equal(nbA.items[1].parentSectionGroup.displayName, "Archive");
+    assert.equal(new URL(ms.calls.graph.at(-1).url).pathname, "/v1.0/me/onenote/sections");
+    assert.match(lastQuery(ms).get("$expand"), /parentNotebook.*parentSectionGroup/);
+    const nbAPage = result(await mcp.callTool({ name: "list_onenote_sections", arguments: { notebookId: "nb-A", top: 1 } }));
+    assert.deepEqual([nbAPage.items.map((x) => x.id), nbAPage.nextSkip], [["sections-0"], 1]);
+    await mcp.callTool({ name: "list_onenote_sections", arguments: {} });
+    assert.equal(new URL(ms.calls.graph.at(-1).url).pathname, "/v1.0/me/onenote/sections", "all sections, groups included");
+
+    const pages = result(await mcp.callTool({ name: "list_onenote_pages", arguments: { sectionId: "0-CD!34" } }));
+    assert.equal(new URL(ms.calls.graph.at(-1).url).pathname, "/v1.0/me/onenote/sections/0-CD!34/pages");
+    assert.equal(pages.items.length, 3);
+    await mcp.callTool({ name: "list_onenote_pages", arguments: {} });
+    assert.equal(new URL(ms.calls.graph.at(-1).url).pathname, "/v1.0/me/onenote/pages");
+    await mcp.close();
+  });
+
+  it("get_onenote_page returns the page as plain text with its metadata", async () => {
+    const { mcp, ms } = await connected();
+    const page = result(await mcp.callTool({ name: "get_onenote_page", arguments: { id: "1-xyz!5" } }));
+    assert.equal(page.title, "Trip plan");
+    assert.equal(page.parentSection.displayName, "Travel");
+    assert.equal(page.parentNotebook.displayName, "Personal");
+    assert.equal(page.truncated, false);
+    const content = ms.calls.graph.at(-1);
+    assert.equal(new URL(content.url).pathname, "/v1.0/me/onenote/pages/1-xyz!5/content");
+    for (const line of ["Packing & prep", "[ ] Book \"hotel\"", "[x] Renew passport", "- Socks", "- Charger — USB-C",
+      "- [x] Print boarding pass", "- [ ] Pack snacks",
+      "Itinerary: the plan (https://example.com/itinerary) and bad", "[image: Map of route]", "[attachment: tickets.pdf]"]) {
+      assert.ok(page.text.includes(line), `missing ${JSON.stringify(line)} in:\n${page.text}`);
+    }
+    // One line per table row, cells tab-separated, paragraph-wrapped and empty cells preserved.
+    const lines = page.text.split("\n");
+    assert.ok(lines.includes("Day 1\tSeattle downtown"), page.text);
+    assert.ok(lines.includes("Day 2\t\tPortland"), "empty middle cell kept");
+    assert.ok(lines.includes("\tlate\t"), "empty first and last cells kept");
+    for (const gone of ["alert", "color:red", "ignore me", "javascript:", "<", "resources/r1", "title=", "a > b"]) {
+      assert.ok(!page.text.includes(gone), `${gone} should not appear`);
+    }
+    const cut = result(await mcp.callTool({ name: "get_onenote_page", arguments: { id: "1-xyz!5", maxChars: 1000 } }));
+    assert.equal(cut.truncated, false, "short page fits");
+    await mcp.close();
+  });
+
+  it("get_onenote_page refuses oversized pages, bad IDs and missing pages cleanly", async () => {
+    const { mcp, ms } = await connected();
+    const huge = await mcp.callTool({ name: "get_onenote_page", arguments: { id: "huge" } });
+    assert.equal(huge.isError, true);
+    assert.match(huge.content[0].text, /too large/);
+    const missing = await mcp.callTool({ name: "get_onenote_page", arguments: { id: "missing" } });
+    assert.equal(missing.isError, true);
+    assert.match(missing.content[0].text, /not found/);
+    const before = ms.calls.graph.length;
+    for (const id of ["../../users/x", "a/b", "..", "a?b"]) {
+      const bad = await mcp.callTool({ name: "get_onenote_page", arguments: { id } });
+      assert.equal(bad.isError, true, id);
+    }
+    const badSection = await mcp.callTool({ name: "list_onenote_pages", arguments: { sectionId: "../x" } });
+    assert.equal(badSection.isError, true);
+    assert.equal(ms.calls.graph.length, before, "no Graph call for invalid IDs");
+    await mcp.close();
+  });
 
   it("reports equal or reversed calendar ranges without calling Graph", async () => {
     const { mcp, ms } = await connected();

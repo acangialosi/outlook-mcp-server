@@ -6,13 +6,14 @@ export const GRAPH_SCOPES = [
   "https://graph.microsoft.com/Mail.ReadWrite", // move messages, report not-junk
   "https://graph.microsoft.com/Calendars.Read",
   "https://graph.microsoft.com/Contacts.Read",
+  "https://graph.microsoft.com/Notes.Read", // OneNote notebooks, sections and pages (read-only)
 ];
 
 /**
  * Bump when GRAPH_SCOPES changes. Grants consented under an older version are discarded,
  * so MCP clients get a 401 and send the user back through consent for the new scopes.
  */
-export const GRANT_VERSION = 2;
+export const GRANT_VERSION = 3; // 3: added Notes.Read
 
 /** The scope this server issues to MCP clients. */
 export const MCP_SCOPE = "outlook.read";
