@@ -8,7 +8,7 @@
 # Needs: GITLEAKS (path to the pinned gitleaks binary) for secrets; pipx for sast.
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-SEMGREP_VERSION=1.181.0
+SEMGREP_VERSION=1.182.0
 
 deps() { (cd "$1" && npm audit --audit-level=moderate); }
 hygiene() { node "$ROOT/scripts/operational-hygiene.mjs" "$1"; }
