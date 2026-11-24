@@ -11,7 +11,7 @@ const schema = z.strictObject({
   schemaVersion: z.literal(1),
   runtime: z.strictObject({ port: z.literal(8080), healthPath: z.literal("/healthz"), mcpPath: z.literal("/mcp") }),
   environment: z.strictObject({ required: z.array(z.string()).min(1), optional: z.array(z.string()) }),
-  graph: z.strictObject({ scopes: z.array(z.url()).min(1), grantVersion: z.literal(2) }),
+  graph: z.strictObject({ scopes: z.array(z.url()).min(1), grantVersion: z.literal(3) }),
 });
 const required = {
   PUBLIC_URL: "https://server.example",
