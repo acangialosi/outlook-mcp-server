@@ -1,10 +1,12 @@
 name: Dependabot auto-merge
 
-# GitHub-native merge step for Dependabot (GitHub's documented pattern). For Dependabot's own PRs, this
-# turns on GitHub auto-merge (squash) for patch and minor updates. GitHub then merges only after every
-# required status check and the main-protection ruleset are satisfied (including resolved review threads);
-# nothing is merged here directly. Major-version updates are left for the owner.
-# Requires the repository setting "Allow auto-merge" (Settings > General > Pull Requests).
+# GitHub-native merge step for Dependabot (GitHub's documented pattern). For Dependabot's own PRs whose
+# update type is exactly semver-patch or semver-minor, this asks GitHub to squash-merge once the enforced
+# main-protection ruleset is satisfied: required `test`, `docker`, `security` checks on an up-to-date branch
+# and resolved review threads. If those are already satisfied, `gh pr merge --auto` merges immediately;
+# otherwise it enables auto-merge (repository setting "Allow auto-merge", Settings > General > Pull Requests).
+# Majors and unclassified updates stay manual. GitHub cannot make a merge wait for Copilot's review; the
+# enforced checks and thread resolution are the gate for these updates.
 on: pull_request
 
 permissions:
@@ -22,8 +24,8 @@ jobs:
       - name: Read Dependabot update metadata
         id: meta
         uses: dependabot/fetch-metadata@21025c705c08248db411dc16f3619e6b5f9ea21a # v2.5.0
-      - name: Enable auto-merge for patch and minor updates
-        if: steps.meta.outputs.update-type != 'version-update:semver-major'
+      - name: Merge patch and minor updates once the enforced rules pass
+        if: steps.meta.outputs.update-type == 'version-update:semver-patch' || steps.meta.outputs.update-type == 'version-update:semver-minor'
         env:
           PR_URL: ${{ github.event.pull_request.html_url }}
           GH_TOKEN: ${{ github.token }}

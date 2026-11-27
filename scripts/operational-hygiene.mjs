@@ -32,7 +32,7 @@ export function inspectFile(path, text) {
     /^src\/[^/]+\.ts$/.test(path) ||
     /^test\/[^/]+\.test\.mjs$/.test(path) ||
     /^scripts\/[^/]+\.(?:mjs|py|sh)$/.test(path) ||
-    /^\.github\/(?:copilot-instructions\.md|dependabot\.yml|rulesets\/[^/]+\.json|workflows\/(?:ci|security-tool-updates)\.yml)$/.test(path);
+    /^\.github\/(?:copilot-instructions\.md|dependabot\.yml|rulesets\/[^/]+\.json|workflows\/(?:ci|security-tool-updates|dependabot-auto-merge)\.yml)$/.test(path);
   if (!permitted) add("unexpected-file");
   if (/(?:^|\/)\.env(?:$|\.)/.test(path) && path !== ".env.example") add("environment-file");
   if (/(?:^|\/)(?:infra|deployment|__pycache__)(?:\/|$)|\.(?:pem|key|pfx|p12|pyc|exe|dll|zip|tgz|gz|bin|log)$/i.test(path)) add("deployment-or-artifact");
