@@ -1,0 +1,32 @@
+name: Dependabot auto-merge
+
+# GitHub-native merge step for Dependabot (GitHub's documented pattern). For Dependabot's own PRs whose
+# update type is exactly semver-patch or semver-minor, this asks GitHub to squash-merge once the enforced
+# main-protection ruleset is satisfied: required `test`, `docker`, `security` checks on an up-to-date branch
+# and resolved review threads. If those are already satisfied, `gh pr merge --auto` merges immediately;
+# otherwise it enables auto-merge (repository setting "Allow auto-merge", Settings > General > Pull Requests).
+# Majors and unclassified updates stay manual. GitHub cannot make a merge wait for Copilot's review; the
+# enforced checks and thread resolution are the gate for these updates.
+on: pull_request
+
+permissions:
+  contents: read
+
+jobs:
+  enable-auto-merge:
+    if: github.event.pull_request.user.login == 'dependabot[bot]' && github.repository == 'acangialosi/outlook-mcp-server'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - name: Read Dependabot update metadata
+        id: meta
+        uses: dependabot/fetch-metadata@21025c705c08248db411dc16f3619e6b5f9ea21a # v2.5.0
+      - name: Merge patch and minor updates once the enforced rules pass
+        if: steps.meta.outputs.update-type == 'version-update:semver-patch' || steps.meta.outputs.update-type == 'version-update:semver-minor'
+        env:
+          PR_URL: ${{ github.event.pull_request.html_url }}
+          GH_TOKEN: ${{ github.token }}
+        run: gh pr merge --auto --squash "$PR_URL"
