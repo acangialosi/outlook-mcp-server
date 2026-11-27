@@ -1,0 +1,30 @@
+name: Dependabot auto-merge
+
+# GitHub-native merge step for Dependabot (GitHub's documented pattern). For Dependabot's own PRs, this
+# turns on GitHub auto-merge (squash) for patch and minor updates. GitHub then merges only after every
+# required status check and the main-protection ruleset are satisfied (including resolved review threads);
+# nothing is merged here directly. Major-version updates are left for the owner.
+# Requires the repository setting "Allow auto-merge" (Settings > General > Pull Requests).
+on: pull_request
+
+permissions:
+  contents: read
+
+jobs:
+  enable-auto-merge:
+    if: github.event.pull_request.user.login == 'dependabot[bot]' && github.repository == 'acangialosi/outlook-mcp-server'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - name: Read Dependabot update metadata
+        id: meta
+        uses: dependabot/fetch-metadata@21025c705c08248db411dc16f3619e6b5f9ea21a # v2.5.0
+      - name: Enable auto-merge for patch and minor updates
+        if: steps.meta.outputs.update-type != 'version-update:semver-major'
+        env:
+          PR_URL: ${{ github.event.pull_request.html_url }}
+          GH_TOKEN: ${{ github.token }}
+        run: gh pr merge --auto --squash "$PR_URL"
